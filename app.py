@@ -110,7 +110,7 @@ Don't talk about timeslast's private stuff unless you're talking to timeslast.
 if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_API_KEY_HERE":
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        model_name = 'gemini-1.5-flash-preview-0514' # Or 'gemini-1.5-flash-latest'
+        model_name = 'gemini-2.5-flash-preview-04-17' # Or 'gemini-1.5-flash-latest'
         print(f"Initializing Gemini model: {model_name} (System Prompt will be injected per request).")
         model = genai.GenerativeModel(
             model_name,
