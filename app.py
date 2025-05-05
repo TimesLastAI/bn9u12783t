@@ -36,7 +36,7 @@ if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_API_KEY_HERE":
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         # Use a model that supports system instructions and history well
-        model_name = 'gemini-1.5-flash-latest' # Or 'gemini-1.5-pro-latest'
+        model_name = 'gemini-2.5-flash-preview-04-17' # Or 'gemini-1.5-pro-latest'
         # Add system instruction if needed
         # system_instruction = "You are a helpful assistant."
         model = genai.GenerativeModel(
