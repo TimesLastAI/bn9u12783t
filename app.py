@@ -8,7 +8,7 @@ import time
 import traceback
 
 # --- Configuration ---
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE") # Replace or use env var
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyAVwcIqPRKr6b4jiL43hSCvuaFt_A92stQ") # Replace or use env var
 if GEMINI_API_KEY == "YOUR_API_KEY_HERE":
     print("\n---> WARNING: Using placeholder API Key. <---")
     print("---> SET the GEMINI_API_KEY environment variable or replace the placeholder in app.py! <---\n")
