@@ -118,7 +118,7 @@ if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_API_KEY_HERE":
         genai.configure(api_key=GEMINI_API_KEY)
         # Choose a model that supports system instructions well
         # gemini-1.5-flash is generally good and fast
-        model_name = 'gemini-1.5-flash-latest'
+        model_name = 'gemini-2.5-flash-preview-04-17'
         print(f"Initializing Gemini model: {model_name} with System Instruction.")
 
         model = genai.GenerativeModel(
