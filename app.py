@@ -1,5 +1,6 @@
 import os
 import google.generativeai as genai
+# Removed unused import: from google.genai import types
 from flask import Flask, request, jsonify, json
 from flask_cors import CORS
 import werkzeug # For secure_filename
@@ -47,11 +48,12 @@ Don't talk about timeslast's private stuff unless you're talking to timeslast.
 if GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_API_KEY_HERE":
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        model_name = 'gemini-2.5-flash-preview-04-17' # Or 'gemini-1.5-flash-latest'
+        model_name = 'gemini-1.5-flash-preview-0514' # Or 'gemini-1.5-flash-latest'
         print(f"Initializing Gemini model: {model_name} (System Prompt will be injected per request).")
         model = genai.GenerativeModel(
             model_name,
             safety_settings=safety_settings_none
+            # system_instruction can be set here for global effect, but we inject per-request
         )
         print(f"Gemini client initialized successfully with model '{model_name}'.")
     except Exception as e:
@@ -88,16 +90,15 @@ def chat_handler():
     print(f"Received Prompt: '{text_prompt[:100]}{'...' if len(text_prompt) > 100 else ''}'")
     print(f"Received File: {'Yes - ' + uploaded_file_obj.filename if uploaded_file_obj and uploaded_file_obj.filename else 'No'}")
 
-    # --- Parse History (Assume it's context *before* the current turn) ---
+    # --- Parse History (Assume it's context *before* the current turn and correctly formatted) ---
     try:
-        # *** CRITICAL ASSUMPTION / REQUIREMENT FOR FRONTEND ***
-        # This code now assumes the 'history' received from the frontend
-        # contains only the conversation turns *BEFORE* the current user message.
-        # The frontend MUST send the history in this format to prevent duplication issues.
+        # This history *should* already contain parts arrays with file_data where applicable,
+        # thanks to the frontend logic storing the response from previous turns.
         history_context = json.loads(history_json)
         if not isinstance(history_context, list):
              raise ValueError("History JSON did not decode to a list.")
         print(f"Received History Context ({len(history_context)} messages).")
+        # Optional: Add deep validation here to check if history items have role/parts structure
 
     except json.JSONDecodeError as e:
         print(f"ERROR parsing history JSON: {e}. Received: '{history_json[:200]}...'")
@@ -111,8 +112,8 @@ def chat_handler():
         return jsonify({"error": "Internal server error processing history."}), 500
 
     # --- Prepare Content for the CURRENT turn ---
-    current_user_parts = []
-    uploaded_gemini_file_info = None
+    current_user_parts = [] # This will hold the parts for the turn being processed now
+    uploaded_file_details_for_frontend = None # For sending URI/mime back to frontend
     temp_file_path = None # Define outside try for use in finally
 
     try:
@@ -126,35 +127,60 @@ def chat_handler():
                 print(f"File saved locally: {temp_file_path}")
 
                 print("Uploading file to Gemini API...")
-                uploaded_gemini_file_info = genai.upload_file(
+                # Upload the file to Gemini
+                uploaded_gemini_file = genai.upload_file( # Use a distinct name
                     path=temp_file_path,
                     display_name=filename
                 )
-                print(f"File uploaded successfully to Gemini. URI: {uploaded_gemini_file_info.uri}")
-                current_user_parts.append(uploaded_gemini_file_info) # Add the File object
+                print(f"File uploaded successfully to Gemini. URI: {uploaded_gemini_file.uri}")
+
+                # *** CHANGE: Create the file_data part structure ***
+                # This structure mirrors Part.from_uri and how we store files in history
+                file_data_part = {
+                    "file_data": {
+                        "mime_type": uploaded_gemini_file.mime_type,
+                        "file_uri": uploaded_gemini_file.uri
+                    }
+                }
+                current_user_parts.append(file_data_part) # Add this structured part
+                print(f"Added file_data part to current turn: {file_data_part}")
+                # *************************************************
+
+                # Prepare details to send back to frontend for *its* history update
+                uploaded_file_details_for_frontend = {
+                    "uri": uploaded_gemini_file.uri,
+                    "mime_type": uploaded_gemini_file.mime_type,
+                    "name": uploaded_gemini_file.display_name
+                }
 
             except Exception as upload_err:
                  print(f"ERROR Uploading file '{filename if 'filename' in locals() else 'unknown'}': {upload_err}")
                  traceback.print_exc()
+                 # Cleanup handled in finally
                  return jsonify({"error": f"File upload failed: {upload_err}"}), 500
+            # No 'finally' here; moved outside the main try/except
 
         # --- Handle Text Prompt (if present in *this* request) ---
         if text_prompt:
-            current_user_parts.append({"text": text_prompt})
+            # Create the text part structure
+            text_part = {"text": text_prompt}
+            current_user_parts.append(text_part) # Add the text part
+            print(f"Added text part to current turn.")
 
         # --- Validate that the current turn has content ---
-        # Note: An empty prompt might be valid if only a file is sent.
         if not current_user_parts:
              print("ERROR: Request rejected - No text prompt or file provided for the current turn.")
              return jsonify({"error": "No prompt or file content provided for this message."}), 400
 
         # --- Construct final contents list for Gemini API ---
+        # Inject system prompt reliably using the user/model pattern
         prompt_injection_contents = [
             {"role": "user", "parts": [{"text": system_instruction}]},
-            {"role": "model", "parts": [{"text": "Understood."}]}
+            {"role": "model", "parts": [{"text": "Understood."}]} # Model acknowledges the prompt
         ]
 
-        # Combine: System Injection + History Context + Newly Constructed Current User Message
+        # Combine: System Injection + History Context (from frontend) + Newly Constructed Current User Turn
+        # history_context *should* already contain the correct 'parts' structure from previous turns
         gemini_contents = prompt_injection_contents + history_context + [{"role": "user", "parts": current_user_parts}]
 
         # --- Define Generation Config & Safety Settings ---
@@ -165,9 +191,18 @@ def chat_handler():
         safety_settings_list = safety_settings_none
 
         print(f"Calling Gemini with {len(gemini_contents)} content blocks...")
-        # print(f"DEBUG: Contents sent: {json.dumps(gemini_contents, indent=2)}") # Optional: Verbose debug
+        # --- Add DEBUG logging to verify the structure sent ---
+        print("-" * 10 + " DEBUG: Contents Sent to Gemini " + "-" * 10)
+        try:
+            print(json.dumps(gemini_contents, indent=2)) # Pretty print the list
+        except TypeError as e:
+            print(f"Could not serialize contents for printing: {e}")
+            print(f"Raw contents: {gemini_contents}") # Print raw list if JSON fails
+        print("-" * (33 + len(" DEBUG: Contents Sent to Gemini ")))
+        # --- End DEBUG ---
 
         # --- Call Gemini API ---
+        # The library handles the dictionary structure in gemini_contents
         response = model.generate_content(
             contents=gemini_contents,
             generation_config=generation_config_dict,
@@ -176,10 +211,11 @@ def chat_handler():
 
         print("Gemini response received.")
 
-        # --- Process Gemini Response (Using robust checks) ---
+        # --- Process Gemini Response (Using robust checks from previous steps) ---
         reply_text = ""
         error_msg = None
         try:
+            # ... (Keep the robust response checking logic from previous versions) ...
             if response.prompt_feedback and response.prompt_feedback.block_reason:
                  block_reason = response.prompt_feedback.block_reason.name
                  error_msg = f"Request blocked by API before generation (Reason: {block_reason})."
@@ -215,6 +251,7 @@ def chat_handler():
                             error_msg = "Response generated but no text content found in parts."
                             print(f"Candidate Content: {candidate.content}")
 
+
         except Exception as resp_err:
              print(f"ERROR: Unexpected error processing Gemini response object: {resp_err}")
              traceback.print_exc()
@@ -227,7 +264,12 @@ def chat_handler():
              return jsonify({"error": error_msg}), status_code
         else:
              print(f"Returning success reply to frontend (len={len(reply_text)} chars).")
-             return jsonify({"reply": reply_text})
+             response_data = {"reply": reply_text}
+             # Include file details *if a file was uploaded in THIS request*
+             if uploaded_file_details_for_frontend:
+                 response_data["uploaded_file_details"] = uploaded_file_details_for_frontend
+                 print("Including uploaded file details in response for frontend history.")
+             return jsonify(response_data)
 
     except Exception as e:
         print(f"ERROR in /chat handler: {e}")
