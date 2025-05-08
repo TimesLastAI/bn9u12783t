@@ -1,7 +1,6 @@
 import os
-# Imports based on your working examples and the older SDK pattern
-from google import genai
-from google.genai import types
+# Correct import for the 'google-genai' pip package
+import google.generativeai as genai 
 
 from flask import Flask, request, jsonify, json
 from flask_cors import CORS
@@ -9,11 +8,12 @@ import werkzeug
 import time
 import traceback
 import logging
+import sys # For logging sys.path if import fails
 
 # --- Configuration ---
-# !!! WARNING: API KEY HARDCODED BELOW - FOR TEMPORARY TESTING ONLY !!!
-HARDCODED_GEMINI_API_KEY = "AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo" # Your API Key
-# !!! DO NOT COMMIT THIS KEY TO A PUBLIC REPOSITORY OR USE IN PRODUCTION !!!
+# !!! USING HARDCODED API KEY - TEMPORARY FOR DEBUGGING INSTALLATION !!!
+HARDCODED_GEMINI_API_KEY = "AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo" 
+# !!! REMOVE AND USE ENVIRONMENT VARIABLES AFTER TESTING !!!
 
 UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
@@ -40,31 +40,35 @@ else:
 
 app.logger.info(f"Upload folder '{UPLOAD_FOLDER}' checked/created.")
 app.logger.info("--- Python script starting up (Top of script) ---")
+app.logger.info(f"Python sys.path at startup: {sys.path}") # Log python path
 
-# --- Initialize Gemini Client (Pattern from your examples) ---
-gemini_client = None
+# --- Initialize Gemini (using google-genai SDK pattern) ---
 gemini_api_configured = False
 api_key_to_use = HARDCODED_GEMINI_API_KEY
 
 try:
-    app.logger.info("--- Attempting to initialize Gemini Client (genai.Client pattern) ---")
-    app.logger.warning("!!! USING HARDCODED API KEY - FOR TEMPORARY TESTING ONLY !!!")
+    app.logger.info("--- Attempting to configure Gemini API (genai.configure pattern) ---")
+    app.logger.warning("!!! USING HARDCODED API KEY - FOR TEMPORARY DEBUGGING !!!")
 
-    loggable_key_part = "NOT_PROCESSED"
+    loggable_key_part = "'NOT_PROCESSED_YET'"
     if api_key_to_use:
         if len(api_key_to_use) > 8: loggable_key_part = f"'{api_key_to_use[:5]}...{api_key_to_use[-3:]}'"
-        elif len(api_key_to_use) > 0: loggable_key_part = f"'{api_key_to_use}' (short key)"
-        else: loggable_key_part = "'EMPTY_STRING_HARDCODED'"
-        app.logger.info(f"Using hardcoded API Key: {loggable_key_part} to init genai.Client.")
-
-        gemini_client = genai.Client(api_key=api_key_to_use)
-        app.logger.info("Successfully initialized genai.Client with HARDCODED key.")
+        else: loggable_key_part = f"'{api_key_to_use}' (short key)"
+        app.logger.info(f"Using hardcoded API Key: {loggable_key_part} for genai.configure().")
+        
+        # This is the configuration for the 'google-genai' package
+        genai.configure(api_key=api_key_to_use)
+        app.logger.info("genai.configure() called successfully with HARDCODED key.")
         gemini_api_configured = True
     else:
         app.logger.error("CRITICAL: Hardcoded GEMINI_API_KEY is None or empty.")
 
+except AttributeError as ae: # Specifically catch if 'genai' object doesn't have 'configure'
+    app.logger.error(f"AttributeError during genai.configure(): {ae}. This might mean the wrong 'google.generativeai' module was imported (e.g., from an older conflicting package if 'google-generativeai' pip package was also installed).")
+    app.logger.error(f"Path to imported 'genai' module (if available): {getattr(genai, '__file__', 'N/A')}")
+    app.logger.error(traceback.format_exc())
 except Exception as e:
-    app.logger.error(f"ERROR: Exception during Gemini Client initialization. Key: {loggable_key_part}. Exception: {type(e).__name__} - {e}")
+    app.logger.error(f"ERROR: Exception during Gemini API configuration. Key: {loggable_key_part}. Exception: {type(e).__name__} - {e}")
     app.logger.error(traceback.format_exc())
 
 app.logger.info(f"--- Gemini API Configuration Status at end of init block: {gemini_api_configured} ---")
@@ -72,15 +76,15 @@ app.logger.info(f"--- Gemini API Configuration Status at end of init block: {gem
 # --- Routes ---
 @app.route('/')
 def root():
-    app.logger.info(f"Root endpoint '/' accessed. Client Initialized: {gemini_api_configured}")
-    return jsonify({"status": "Backend running", "gemini_api_configured": gemini_api_configured}), 200
+    app.logger.info(f"Root endpoint '/' accessed. API Configured: {gemini_api_configured}")
+    return jsonify({"status": "Backend running (google-genai pattern)", "gemini_api_configured": gemini_api_configured}), 200
 
 @app.route('/chat', methods=['POST'])
 def chat_handler():
     app.logger.info("Chat handler '/chat' invoked (POST).")
-    if not gemini_client or not gemini_api_configured:
-        app.logger.error("Chat handler: Gemini client not initialized or API not configured.")
-        return jsonify({"error": "Backend Gemini client not initialized. Check server logs."}), 500
+    if not gemini_api_configured:
+        app.logger.error("Chat handler: Gemini API (genai.configure pattern) not configured.")
+        return jsonify({"error": "Backend Gemini API not configured. Check server logs."}), 500
 
     text_prompt = request.form.get('prompt', '')
     uploaded_file_obj = request.files.get('file')
@@ -90,107 +94,80 @@ def chat_handler():
         history_context = json.loads(history_json)
         if not isinstance(history_context, list): raise ValueError("History not a list")
     except Exception as e:
-        app.logger.warning(f"Invalid history format: {e}. Received: {history_json[:200]}")
-        return jsonify({"error": "Invalid history format."}), 400
+        return jsonify({"error": f"Invalid history format: {e}"}), 400
 
-    current_user_parts_for_sdk = []
+    current_user_parts = [] # For genai.GenerativeModel parts
     uploaded_file_details_for_frontend = None
     temp_file_path = None
 
     try:
         if uploaded_file_obj and uploaded_file_obj.filename:
             filename = werkzeug.utils.secure_filename(uploaded_file_obj.filename)
-            if not filename:
-                return jsonify({"error": "Invalid file name."}), 400
+            if not filename: return jsonify({"error": "Invalid file name."}), 400
             
             unique_filename = f"{int(time.time())}_{filename}"
             temp_file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
             uploaded_file_obj.save(temp_file_path)
-            app.logger.info(f"File saved to {temp_file_path}. Uploading to Gemini Files API...")
+            app.logger.info(f"File saved to {temp_file_path}. Uploading using genai.upload_file...")
 
-            gemini_uploaded_file_obj = gemini_client.files.upload(file=temp_file_path)
-            app.logger.info(f"File uploaded to Gemini. URI: {gemini_uploaded_file_obj.uri}")
+            # File upload for 'google-genai' SDK
+            gemini_uploaded_file_response = genai.upload_file(path=temp_file_path, display_name=filename)
+            app.logger.info(f"File uploaded via genai.upload_file. URI: {gemini_uploaded_file_response.uri}")
 
-            current_user_parts_for_sdk.append(types.Part.from_uri(
-                file_uri=gemini_uploaded_file_obj.uri,
-                mime_type=gemini_uploaded_file_obj.mime_type
-            ))
+            current_user_parts.append({"file_data": {"mime_type": gemini_uploaded_file_response.mime_type, "file_uri": gemini_uploaded_file_response.uri}})
             uploaded_file_details_for_frontend = {
-                "uri": gemini_uploaded_file_obj.uri, "mime_type": gemini_uploaded_file_obj.mime_type, "name": gemini_uploaded_file_obj.display_name
+                "uri": gemini_uploaded_file_response.uri, "mime_type": gemini_uploaded_file_response.mime_type, "name": gemini_uploaded_file_response.display_name
             }
 
         if text_prompt:
-            current_user_parts_for_sdk.append(types.Part.from_text(text=text_prompt))
+            current_user_parts.append({"text": text_prompt})
 
-        if not current_user_parts_for_sdk:
+        if not current_user_parts:
             return jsonify({"error": "No prompt or file content provided."}), 400
-
-        sdk_contents = []
-        # System prompt handling: Your system prompt should ideally be the first message(s) in history_context.
-        # Or, construct it here if it's static and needs to be prepended.
-        # Example static system prompt prepending:
-        # system_instruction_text = "You are a helpful assistant." # Your actual system prompt
-        # sdk_contents.append(types.Content(role="user", parts=[types.Part.from_text(system_instruction_text)]))
-        # sdk_contents.append(types.Content(role="model", parts=[types.Part.from_text("Understood.")]))
-
-        for hist_item in history_context: # Process actual chat history
-            sdk_hist_parts = []
-            for part_data in hist_item.get("parts", []):
-                if "text" in part_data:
-                    sdk_hist_parts.append(types.Part.from_text(text=part_data["text"]))
-                elif "file_data" in part_data and "file_uri" in part_data["file_data"] and "mime_type" in part_data["file_data"]:
-                     sdk_hist_parts.append(types.Part.from_uri(
-                         file_uri=part_data["file_data"]["file_uri"],
-                         mime_type=part_data["file_data"]["mime_type"]
-                     ))
-            if sdk_hist_parts:
-                 sdk_contents.append(types.Content(role=hist_item["role"], parts=sdk_hist_parts))
         
-        sdk_contents.append(types.Content(role="user", parts=current_user_parts_for_sdk))
+        # System prompt (should be part of history_context from frontend)
+        # Your frontend should construct history_context like:
+        # [ {"role": "user", "parts": [{"text": "SYSTEM PROMPT"}]}, {"role": "model", "parts": [{"text":"OK"}]}, ...chat... ]
+        sdk_contents = history_context + [{"role": "user", "parts": current_user_parts}]
         
-        # Tool configuration
-        tools_for_sdk_call = [
-            types.Tool(google_search=types.GoogleSearch()),
+        tools_for_sdk = [
+            genai.types.Tool(google_search_retrieval={}) # For 'google-genai' SDK
         ]
-        app.logger.info(f"Tools configured for SDK call: {tools_for_sdk_call}")
+        app.logger.info(f"Tools for 'google-genai' SDK: {tools_for_sdk}")
 
-        # This is the GenerateContentConfig object that holds tools and other settings
-        sdk_generate_content_config = types.GenerateContentConfig(
-            tools=tools_for_sdk_call,
-            # response_mime_type="text/plain", # Optional
+        generation_config_sdk = genai.types.GenerationConfig(
+            # temperature=0.7 # example
         )
         
-        model_to_use = "models/gemini-2.5-flash-preview-04-17"
-        app.logger.info(f"Calling client.models.generate_content on '{model_to_use}' with config.")
+        # Model selection - try a GA model first for tool support
+        # model_name_to_use = "models/gemini-2.5-flash-preview-04-17"
+        model_name_to_use = "gemini-1.5-flash-latest" # Recommended for tool testing
+        # model_name_to_use = "gemini-pro" # Alternative GA model
 
-        # *** MODIFIED API CALL: Use 'config=' parameter ***
-        response = gemini_client.models.generate_content( # Non-streaming version for now
-            model=model_to_use,
+        app.logger.info(f"Using model '{model_name_to_use}' with genai.GenerativeModel.")
+        model_instance = genai.GenerativeModel(
+            model_name=model_name_to_use,
+            # system_instruction= # If your system prompt isn't in history, add it here for some models
+            )
+        
+        app.logger.info(f"Calling model.generate_content on '{model_instance.model_name}' with tools.")
+        response = model_instance.generate_content(
             contents=sdk_contents,
-            generation_config=sdk_generate_content_config # Use 'generation_config' if that's what this client.models.generate_content expects
-                                                       # OR use 'config=sdk_generate_content_config' if that's the correct param name
-                                                       # The error message will guide us if this is still wrong for this specific SDK version.
-                                                       # Based on your example for streaming, it was 'config'. Let's try that.
+            generation_config=generation_config_sdk,
+            tools=tools_for_sdk
         )
-        # *** Re-checking your example, it used 'config'. Let's stick to that for the client.models.generate_content call ***
-        response = gemini_client.models.generate_content(
-            model=model_to_use,
-            contents=sdk_contents,
-            config=sdk_generate_content_config # <<<<----- CORRECTED PARAMETER NAME
-        )
-
-        app.logger.info("Received response from Gemini generate_content.")
+        app.logger.info("Received response from model.generate_content.")
         
         reply_text = ""
+        # ... (response processing logic - from previous correct versions)
         if response.prompt_feedback and response.prompt_feedback.block_reason:
-            return jsonify({"error": f"Content blocked by API: {response.prompt_feedback.block_reason}"}), 400
+            return jsonify({"error": f"Content blocked: {response.prompt_feedback.block_reason}"}), 400
 
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+        if response.candidates:
             for part in response.candidates[0].content.parts:
                 if part.text:
                     reply_text += part.text
-        elif hasattr(response, 'text') and response.text:
-            reply_text = response.text
+                # Handle function calls if necessary (though google_search_retrieval is usually automatic)
         
         result = {"reply": reply_text}
         if uploaded_file_details_for_frontend:
@@ -198,13 +175,14 @@ def chat_handler():
         
         return jsonify(result)
 
+    except google.api_core.exceptions.InvalidArgument as e_invalid_arg:
+        app.logger.error(f"InvalidArgument from Google API: {e_invalid_arg}")
+        if "Search Grounding is not supported" in str(e_invalid_arg):
+            return jsonify({"error": f"Model '{model_name_to_use}' does not support search grounding. Try a different model."}), 400
+        return jsonify({"error": f"API Argument Error: {e_invalid_arg}"}), 400
     except Exception as e:
         app.logger.error(f"Unhandled error in chat_handler: {type(e).__name__} - {str(e)}")
         app.logger.error(traceback.format_exc())
-        # Check if the error is due to the model not supporting tools
-        if "Search Grounding is not supported" in str(e) or (hasattr(e, 'grpc_status_code') and e.grpc_status_code == 3): # 3 is often InvalidArgument
-            app.logger.warning("The model likely does not support the requested tool (Google Search). Consider changing the model.")
-            return jsonify({"error": f"Model error: {str(e)}. Search tool might not be supported by this model."}), 400
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
     finally:
         if temp_file_path and os.path.exists(temp_file_path):
@@ -213,8 +191,8 @@ def chat_handler():
 
 if __name__ == '__main__':
     if not gemini_api_configured:
-        app.logger.critical("CRITICAL: Gemini Client not initialized (hardcoded key). Server not effective.")
+        app.logger.critical("CRITICAL: Gemini API (genai.configure pattern) NOT configured.")
     else:
-        app.logger.info("Starting Flask dev server (Gemini Client initialized with HARDCODED key).")
+        app.logger.info("Starting Flask dev server (genai.configure pattern, HARDCODED key).")
         app.logger.warning("!!! SERVER RUNNING WITH HARDCODED API KEY - INSECURE !!!")
-        app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)
