@@ -167,7 +167,7 @@ def chat_handler():
         generation_settings = types.GenerationConfig()
         app.logger.debug(f"GenerationConfig prepared. Tools enabled: Google Search.")
 
-        model_name_to_use = "models/gemini-2.5-flash-preview-04-17"
+        model_name_to_use = "gemini-2.5-flash-preview-04-17"
         app.logger.info(f"Initializing GenerativeModel with: '{model_name_to_use}'")
         
         model_instance = genai.GenerativeModel(model_name=model_name_to_use)
