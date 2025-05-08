@@ -1,7 +1,7 @@
 import os
-# Imports based on your working examples
+# Imports based on your working examples and the older SDK pattern
 from google import genai
-from google.genai import types # This should now work if 'google-generativeai' package provides it this way
+from google.genai import types
 
 from flask import Flask, request, jsonify, json
 from flask_cors import CORS
@@ -57,11 +57,7 @@ try:
         else: loggable_key_part = "'EMPTY_STRING_HARDCODED'"
         app.logger.info(f"Using hardcoded API Key: {loggable_key_part} to init genai.Client.")
 
-        gemini_client = genai.Client(api_key=api_key_to_use) # Initialize client
-        
-        # Simple test to see if client is somewhat functional (e.g., list models)
-        # models_list = [m.name for m in gemini_client.models.list()]
-        # app.logger.info(f"Successfully initialized genai.Client. Found models (sample): {models_list[:3]}")
+        gemini_client = genai.Client(api_key=api_key_to_use)
         app.logger.info("Successfully initialized genai.Client with HARDCODED key.")
         gemini_api_configured = True
     else:
@@ -82,14 +78,13 @@ def root():
 @app.route('/chat', methods=['POST'])
 def chat_handler():
     app.logger.info("Chat handler '/chat' invoked (POST).")
-    if not gemini_client or not gemini_api_configured: # Check client instance
+    if not gemini_client or not gemini_api_configured:
         app.logger.error("Chat handler: Gemini client not initialized or API not configured.")
         return jsonify({"error": "Backend Gemini client not initialized. Check server logs."}), 500
 
     text_prompt = request.form.get('prompt', '')
     uploaded_file_obj = request.files.get('file')
     history_json = request.form.get('history', '[]')
-    # conversation_id = request.form.get('conversation_id', '') # Not used in this SDK pattern directly for calls
 
     try:
         history_context = json.loads(history_json)
@@ -98,8 +93,7 @@ def chat_handler():
         app.logger.warning(f"Invalid history format: {e}. Received: {history_json[:200]}")
         return jsonify({"error": "Invalid history format."}), 400
 
-    current_user_parts_for_sdk = [] # For constructing types.Part
-    current_user_parts_for_history = [] # For your own history tracking
+    current_user_parts_for_sdk = []
     uploaded_file_details_for_frontend = None
     temp_file_path = None
 
@@ -109,37 +103,37 @@ def chat_handler():
             if not filename:
                 return jsonify({"error": "Invalid file name."}), 400
             
-            unique_filename = f"{int(time.time())}_{filename}" # Simpler unique name
+            unique_filename = f"{int(time.time())}_{filename}"
             temp_file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
             uploaded_file_obj.save(temp_file_path)
             app.logger.info(f"File saved to {temp_file_path}. Uploading to Gemini Files API...")
 
-            # Use client.files.upload (from your example)
-            gemini_uploaded_file_obj = gemini_client.files.upload(file=temp_file_path) # path=temp_file_path if it expects path
+            gemini_uploaded_file_obj = gemini_client.files.upload(file=temp_file_path)
             app.logger.info(f"File uploaded to Gemini. URI: {gemini_uploaded_file_obj.uri}")
 
             current_user_parts_for_sdk.append(types.Part.from_uri(
                 file_uri=gemini_uploaded_file_obj.uri,
                 mime_type=gemini_uploaded_file_obj.mime_type
             ))
-            current_user_parts_for_history.append({"file_data": {"mime_type": gemini_uploaded_file_obj.mime_type, "file_uri": gemini_uploaded_file_obj.uri}})
             uploaded_file_details_for_frontend = {
                 "uri": gemini_uploaded_file_obj.uri, "mime_type": gemini_uploaded_file_obj.mime_type, "name": gemini_uploaded_file_obj.display_name
             }
 
         if text_prompt:
             current_user_parts_for_sdk.append(types.Part.from_text(text=text_prompt))
-            current_user_parts_for_history.append({"text": text_prompt})
 
         if not current_user_parts_for_sdk:
             return jsonify({"error": "No prompt or file content provided."}), 400
 
-        # Construct contents list for the SDK
-        # This needs to align with how your 'history_context' is structured
-        # Assuming history_context is like: [{"role": "user", "parts": [{"text": "..."}]}, {"role": "model", "parts": [{"text": "..."}]}]
-        # And parts in history might contain text or file_data that need to be converted to types.Part
         sdk_contents = []
-        for hist_item in history_context:
+        # System prompt handling: Your system prompt should ideally be the first message(s) in history_context.
+        # Or, construct it here if it's static and needs to be prepended.
+        # Example static system prompt prepending:
+        # system_instruction_text = "You are a helpful assistant." # Your actual system prompt
+        # sdk_contents.append(types.Content(role="user", parts=[types.Part.from_text(system_instruction_text)]))
+        # sdk_contents.append(types.Content(role="model", parts=[types.Part.from_text("Understood.")]))
+
+        for hist_item in history_context: # Process actual chat history
             sdk_hist_parts = []
             for part_data in hist_item.get("parts", []):
                 if "text" in part_data:
@@ -154,61 +148,63 @@ def chat_handler():
         
         sdk_contents.append(types.Content(role="user", parts=current_user_parts_for_sdk))
         
-        # System prompt handling - this SDK pattern doesn't have a direct 'system_instruction' param in generate_content
-        # It's usually prepended as a user/model turn in `contents` or part of the first user message.
-        # Your current history structure seems to handle this if prompt_injection is part of history_context.
-        # For now, I'll assume your 'system_instruction' logic is embedded in the history building.
-
-        # Tool configuration based on your example
-        tools = [
+        # Tool configuration
+        tools_for_sdk_call = [
             types.Tool(google_search=types.GoogleSearch()),
         ]
-        app.logger.info(f"Tools configured for SDK call: {tools}")
+        app.logger.info(f"Tools configured for SDK call: {tools_for_sdk_call}")
 
-        generate_content_config = types.GenerateContentConfig(
-            tools=tools,
+        # This is the GenerateContentConfig object that holds tools and other settings
+        sdk_generate_content_config = types.GenerateContentConfig(
+            tools=tools_for_sdk_call,
             # response_mime_type="text/plain", # Optional
         )
         
-        model_to_use = "models/gemini-2.5-flash-preview-04-17" # Your model
+        model_to_use = "models/gemini-2.5-flash-preview-04-17"
         app.logger.info(f"Calling client.models.generate_content on '{model_to_use}' with config.")
 
-        # Using non-streaming for simplicity first
-        response = gemini_client.models.generate_content(
-            model=model_to_use, # Make sure this is just the model name string
+        # *** MODIFIED API CALL: Use 'config=' parameter ***
+        response = gemini_client.models.generate_content( # Non-streaming version for now
+            model=model_to_use,
             contents=sdk_contents,
-            generation_config=generate_content_config # Corrected from 'config'
+            generation_config=sdk_generate_content_config # Use 'generation_config' if that's what this client.models.generate_content expects
+                                                       # OR use 'config=sdk_generate_content_config' if that's the correct param name
+                                                       # The error message will guide us if this is still wrong for this specific SDK version.
+                                                       # Based on your example for streaming, it was 'config'. Let's try that.
         )
+        # *** Re-checking your example, it used 'config'. Let's stick to that for the client.models.generate_content call ***
+        response = gemini_client.models.generate_content(
+            model=model_to_use,
+            contents=sdk_contents,
+            config=sdk_generate_content_config # <<<<----- CORRECTED PARAMETER NAME
+        )
+
         app.logger.info("Received response from Gemini generate_content.")
         
         reply_text = ""
         if response.prompt_feedback and response.prompt_feedback.block_reason:
-            # Handle blocked prompt
-            # ... (your existing blocking logic here)
-            return jsonify({"error": "Content blocked"}), 400 # Simplified
+            return jsonify({"error": f"Content blocked by API: {response.prompt_feedback.block_reason}"}), 400
 
-        # This SDK version often puts text directly in response.text or response.candidates[0].content.parts[0].text
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
                 if part.text:
                     reply_text += part.text
-        elif hasattr(response, 'text') and response.text: # Check for simpler response structure
+        elif hasattr(response, 'text') and response.text:
             reply_text = response.text
         
-        # Tool calls are usually in response.candidates[0].content.parts if a tool was called by the model
-        # For google_search, the model usually incorporates results into its text response.
-
         result = {"reply": reply_text}
         if uploaded_file_details_for_frontend:
             result["uploaded_file_details"] = uploaded_file_details_for_frontend
         
         return jsonify(result)
 
-    # except types.BlockedPromptException as bpe: # This specific exception might be different for this SDK
-    #     # ...
     except Exception as e:
         app.logger.error(f"Unhandled error in chat_handler: {type(e).__name__} - {str(e)}")
         app.logger.error(traceback.format_exc())
+        # Check if the error is due to the model not supporting tools
+        if "Search Grounding is not supported" in str(e) or (hasattr(e, 'grpc_status_code') and e.grpc_status_code == 3): # 3 is often InvalidArgument
+            app.logger.warning("The model likely does not support the requested tool (Google Search). Consider changing the model.")
+            return jsonify({"error": f"Model error: {str(e)}. Search tool might not be supported by this model."}), 400
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
     finally:
         if temp_file_path and os.path.exists(temp_file_path):
