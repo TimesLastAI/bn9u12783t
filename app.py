@@ -9,7 +9,7 @@ import traceback
 import logging # Import logging
 
 # --- Configuration ---
-GEMINI_API_KEY = os.environ.get("AIzaSyDuSMyFDU2yDVVHLn9rdeXVIDl47fcj-60") # IMPORTANT: Set this environment variable
+GEMINI_API_KEY = ("AIzaSyDuSMyFDU2yDVVHLn9rdeXVIDl47fcj-60") # IMPORTANT: Set this environment variable
 if not GEMINI_API_KEY:
     print("\n---> CRITICAL ERROR: GEMINI_API_KEY environment variable not set. <---")
     print("---> The application will not function correctly without a valid API key. <---\n")
