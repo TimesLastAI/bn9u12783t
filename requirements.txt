@@ -1,5 +1,6 @@
 Flask
 Flask-Cors
 google-generativeai
+google-genai
 Werkzeug
 gunicorn
