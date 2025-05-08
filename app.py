@@ -1,6 +1,8 @@
 import os
-from google import genai
-from google.genai import types
+# MODIFIED IMPORT:
+import google.generativeai as genai
+from google.genai import types # Keeping this for now, may need aliasing if 'google.genai' is the conflicting part
+
 from flask import Flask, request, jsonify, json
 from flask_cors import CORS
 import werkzeug
@@ -10,14 +12,14 @@ import logging
 
 # --- Configuration ---
 # !!! WARNING: API KEY HARDCODED BELOW - FOR TEMPORARY TESTING ONLY !!!
-# !!! Replace with environment variable usage for production or shared code !!!
-HARDCODED_GEMINI_API_KEY = "AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo"
+HARDCODED_GEMINI_API_KEY = "AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo" # Your key
 # !!! DO NOT COMMIT THIS KEY TO A PUBLIC REPOSITORY !!!
 
 UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
-    print(f"Created upload folder: {UPLOAD_FOLDER}")
+    # This print might not show in Render logs if gunicorn starts first, use logger
+    # print(f"Created upload folder: {UPLOAD_FOLDER}")
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -25,31 +27,34 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 CORS(app, resources={r"/chat": {"origins": "*"}})
 
 # --- Setup Flask Logging ---
-if not app.debug:
+if not app.debug: # In production (like on Render by default unless DEBUG=True env var is set)
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(logging.INFO)
     app.logger.addHandler(stream_handler)
     app.logger.setLevel(logging.INFO)
+    # Avoid duplicate logging if gunicorn also configures root logger
+    app.logger.propagate = False # Add this for production with gunicorn
+    gunicorn_logger = logging.getLogger('gunicorn.error')
+    app.logger.handlers.extend(gunicorn_logger.handlers)
     app.logger.info("Flask logger configured for non-debug mode (production).")
-else:
+else: # For local debugging if you run `python app.py`
     app.logger.setLevel(logging.DEBUG)
     app.logger.info("Flask logger running in debug mode.")
 
+app.logger.info(f"Created upload folder: {UPLOAD_FOLDER}") # Log after logger is set
 app.logger.info("--- Python script starting up (Top of script) ---")
 
 # --- Initialize Gemini ---
 gemini_api_configured = False
-api_key_to_use = HARDCODED_GEMINI_API_KEY # Using the hardcoded key
+api_key_to_use = HARDCODED_GEMINI_API_KEY
 
 try:
     app.logger.info("--- Attempting to configure Gemini API (BEGIN) ---")
     app.logger.warning("!!! USING HARDCODED API KEY - FOR TEMPORARY TESTING ONLY !!!")
 
-    if not api_key_to_use: # Should not happen with hardcoding unless it's empty
+    if not api_key_to_use:
         app.logger.error("CRITICAL_FAIL: Hardcoded API Key is empty or None. This should not happen.")
-        # gemini_api_configured remains False
     else:
-        # For logging, show a non-sensitive part of the key
         loggable_key_part = "COULD_NOT_PROCESS_KEY_FOR_LOGGING"
         if len(api_key_to_use) > 8:
             loggable_key_part = f"'{api_key_to_use[:5]}...{api_key_to_use[-3:]}' (Length: {len(api_key_to_use)})"
@@ -59,14 +64,18 @@ try:
             loggable_key_part = "'EMPTY_STRING'"
 
         app.logger.info(f"Using hardcoded API Key: {loggable_key_part}. Attempting genai.configure().")
+        # This 'genai' should now be from 'import google.generativeai as genai'
         genai.configure(api_key=api_key_to_use)
         app.logger.info("Gemini API configured successfully via genai.configure() using the hardcoded key.")
         gemini_api_configured = True
 
 except Exception as e:
-    app.logger.error(f"ERROR: Exception during Gemini API configuration process (using hardcoded key). ExceptionType: {type(e).__name__}, Message: {e}")
+    imported_genai_module_details = "unknown"
+    if 'genai' in globals():
+        imported_genai_module_details = f"Name: {getattr(genai, '__name__', 'N/A')}, Path: {getattr(genai, '__file__', 'N/A')}"
+
+    app.logger.error(f"ERROR: Exception during Gemini API configuration. Imported 'genai' module details: {imported_genai_module_details}. ExceptionType: {type(e).__name__}, Message: {e}")
     app.logger.error(traceback.format_exc())
-    # gemini_api_configured remains False
 
 app.logger.info(f"--- Gemini API Configuration Status at end of init block: {gemini_api_configured} ---")
 
@@ -114,7 +123,7 @@ def chat_handler():
                 return jsonify({"error": "Invalid or insecure file name provided."}), 400
 
             unique_filename = f"{conversation_id or 'conv'}_{int(time.time())}_{filename}"
-            temp_file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
+            temp__path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
             app.logger.info(f"Attempting to save uploaded file to temporary path: '{temp_file_path}'")
             try:
                 uploaded_file_obj.save(temp_file_path)
@@ -126,6 +135,7 @@ def chat_handler():
 
             app.logger.info("Attempting to upload file to Gemini service...")
             try:
+                # This 'genai' should be the one from 'import google.generativeai as genai'
                 uploaded_gemini_file = genai.upload_file(path=temp_file_path, display_name=filename)
                 app.logger.info(f"File uploaded to Gemini successfully. URI: '{uploaded_gemini_file.uri}', MIME type: '{uploaded_gemini_file.mime_type}', Display Name: '{uploaded_gemini_file.display_name}'")
             except Exception as e_gemini_upload:
@@ -155,21 +165,24 @@ def chat_handler():
             app.logger.warning("No prompt text or file content provided to form user parts.")
             return jsonify({"error": "No prompt or file content provided."}), 400
 
-        system_instruction = """...""" # Your extensive system prompt remains here
+        system_instruction = """...""" # Your system prompt
         prompt_injection = [
             {"role": "user", "parts": [{"text": system_instruction}]},
             {"role": "model", "parts": [{"text": "Understood."}]}
         ]
         gemini_contents = prompt_injection + history_context + [{"role": "user", "parts": current_user_parts}]
-        app.logger.debug(f"Prepared 'gemini_contents' with {len(gemini_contents)} total items. Last user part has {len(current_user_parts)} part(s).")
+        app.logger.debug(f"Prepared 'gemini_contents' with {len(gemini_contents)} total items.")
 
-        tools_list = [types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())]
-        generation_settings = types.GenerationConfig()
+        # Ensure 'types' is correctly sourced. If 'from google.genai import types' is problematic,
+        # you might need to use 'genai.types.Tool' etc. or alias 'types' like 'genai_types'
+        tools_list = [types.Tool(google_search_retrieval=types.GoogleSearchRetrieval())] # Or genai.types.Tool(...)
+        generation_settings = types.GenerationConfig() # Or genai.types.GenerationConfig()
         app.logger.debug(f"GenerationConfig prepared. Tools enabled: Google Search.")
 
-        model_name_to_use = "gemini-2.5-flash-preview-04-17"
+        model_name_to_use = "models/gemini-2.5-flash-preview-04-17" # Your model
         app.logger.info(f"Initializing GenerativeModel with: '{model_name_to_use}'")
         
+        # This 'genai' should be the one from 'import google.generativeai as genai'
         model_instance = genai.GenerativeModel(model_name=model_name_to_use)
         
         app.logger.info(f"Calling model.generate_content on '{model_instance.model_name}'")
@@ -187,9 +200,10 @@ def chat_handler():
             return jsonify({"error": f"AI model failed to generate response: {e_gemini_generate}"}), 500
 
         reply_text = ""
+        # (Your response processing logic...)
         if response.prompt_feedback and response.prompt_feedback.block_reason:
             block_reason = response.prompt_feedback.block_reason
-            block_message = response.prompt_feedback.block_reason_message if hasattr(response.prompt_feedback, 'block_reason_message') else "No specific message."
+            block_message = getattr(response.prompt_feedback, 'block_reason_message', "No specific message.")
             app.logger.warning(f"Gemini response was blocked. Reason: {block_reason}, Message: {block_message}")
             return jsonify({"error": f"Content blocked by AI safety filters: {block_reason}. {block_message}"}), 400
 
@@ -202,15 +216,15 @@ def chat_handler():
             for part in candidate.content.parts:
                 if hasattr(part, 'text') and part.text:
                     reply_text += part.text
-        elif hasattr(response, 'text') and response.text:
+        elif hasattr(response, 'text') and response.text: # Fallback for simpler responses
              reply_text = response.text
         else:
             app.logger.warning("Gemini response candidate has no text parts or direct .text attribute.")
-            if candidate.content and candidate.content.parts:
+            if candidate.content and candidate.content.parts: # Check for function calls
                 for part in candidate.content.parts:
                     if hasattr(part, 'function_call'):
                         app.logger.info(f"Model returned a function call, but no immediate text: {part.function_call}")
-                        break
+                        break # Or handle function call
 
         app.logger.info(f"Extracted reply_text (first 100 chars): '{reply_text[:100]}'")
         result = {"reply": reply_text}
@@ -220,12 +234,12 @@ def chat_handler():
         app.logger.info("Chat handler finished successfully. Sending response to frontend.")
         return jsonify(result)
 
-    except types.BlockedPromptException as bpe:
+    except types.BlockedPromptException as bpe: # Or genai.types.BlockedPromptException
         block_reason = "Unknown"
         block_message = "No specific message."
         if bpe.response and bpe.response.prompt_feedback:
             block_reason = bpe.response.prompt_feedback.block_reason
-            block_message = bpe.response.prompt_feedback.block_reason_message if hasattr(bpe.response.prompt_feedback, 'block_reason_message') else "No specific message."
+            block_message = getattr(bpe.response.prompt_feedback, 'block_reason_message', "No specific message.")
         app.logger.warning(f"Gemini API request blocked (BlockedPromptException). Reason: {block_reason}, Message: {block_message}")
         return jsonify({"error": f"Request blocked by content safety filters: {block_reason}. {block_message}"}), 400
     except Exception as e:
@@ -241,10 +255,16 @@ def chat_handler():
                 app.logger.error(f"Failed to remove temporary file '{temp_file_path}': {e_remove}")
         app.logger.info("Chat handler 'finally' block executed.")
 
+
 if __name__ == '__main__':
+    # Note: When running with gunicorn, this __main__ block might not be the primary entry point for Flask's app.run.
+    # Gunicorn runs the 'app' object directly.
+    # The 'debug=True' for app.run() is for local development with `python app.py`.
+    # On Render, gunicorn handles serving, and Flask's debug mode is usually controlled by an ENV var.
     if not gemini_api_configured:
-        app.logger.critical("CRITICAL_SERVER_START_FAIL: Cannot start Flask server because Gemini API was not configured (even with hardcoding attempt). Check startup logs for errors from genai.configure().")
+        app.logger.critical("CRITICAL_SERVER_START_FAIL: Cannot start Flask server because Gemini API was not configured. Check startup logs for errors from genai.configure().")
     else:
         app.logger.info("Starting Flask development server (Gemini API was configured via hardcoded key).")
         app.logger.warning("!!! SERVER RUNNING WITH HARDCODED API KEY - INSECURE - FOR TESTING ONLY !!!")
+        # For local testing:
         app.run(host='0.0.0.0', port=5000, debug=True)
