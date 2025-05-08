@@ -21,7 +21,7 @@ if not os.path.exists(UPLOAD_FOLDER):
 # --- Flask App Setup ---
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-CORS(app, resources={r"/chat": {"origins": "*"}})  # Adjust "*" to your frontend domain in production
+CORS(app)
 print("CORS configured for /chat with origins: *")
 
 # --- Initialize Gemini Client ---
