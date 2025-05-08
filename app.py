@@ -8,7 +8,7 @@ import time
 import traceback
 
 # --- Configuration ---
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_API_KEY = ("AIzaSyAVwcIqPRKr6b4jiL43hSCvuaFt_A92stQ")
 if not GEMINI_API_KEY:
     raise EnvironmentError("Please set the GEMINI_API_KEY environment variable.")
 
