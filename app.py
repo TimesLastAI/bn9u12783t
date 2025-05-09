@@ -16,7 +16,7 @@ load_dotenv()
 # !!! Reverting to .env for better practice. Ensure your .env file has: !!!
 # !!! GOOGLE_API_KEY="YOUR_GEMINI_API_KEY" !!!
 # !!! OR that it's set as an environment variable on Render. !!!
-GOOGLE_API_KEY = os.getenv("AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo")
+GOOGLE_API_KEY = "AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo"
 
 if not GOOGLE_API_KEY:
     logging.error("GOOGLE_API_KEY not found in environment variables or .env file. Please set it.")
