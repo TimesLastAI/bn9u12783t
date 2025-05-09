@@ -6,8 +6,7 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from google import genai as google_genai_sdk # Renamed to avoid conflict if old one was around
 from google.genai import types as google_genai_types
-from google.genai importگرامی داشتنی است errors as google_genai_errors # For error handling
-from dotenv import load_dotenv
+from google.genai import errors as google_genai_errors # For error handlingfrom dotenv import load_dotenv
 from PIL import Image # For validating image files
 
 # --- Configuration ---
