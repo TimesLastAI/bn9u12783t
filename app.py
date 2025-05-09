@@ -7,33 +7,26 @@ from werkzeug.utils import secure_filename
 from google import genai as google_genai_sdk
 from google.genai import types as google_genai_types
 from google.genai import errors as google_genai_errors
-from dotenv import load_dotenv  # <--- MAKE SURE THIS LINE IS HERE AND UNCOMMENTED
+from dotenv import load_dotenv
 from PIL import Image
 
 # --- Configuration ---
-load_dotenv()
-# !!! IMPORTANT: For testing, you had the key hardcoded. !!!
-# !!! Reverting to .env for better practice. Ensure your .env file has: !!!
-# !!! GOOGLE_API_KEY="YOUR_GEMINI_API_KEY" !!!
-# !!! OR that it's set as an environment variable on Render. !!!
+load_dotenv() # Load environment variables from .env file if present
 GOOGLE_API_KEY = "AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo"
 
 if not GOOGLE_API_KEY:
     logging.error("GOOGLE_API_KEY not found in environment variables or .env file. Please set it.")
-    # Exit or raise for a real app. For now, let calls fail if key is missing.
 
 # Configure the Gemini API client using google-genai
-# This client is created once globally.
-try:
-    if GOOGLE_API_KEY:
-        # For google-genai, client is initialized directly, no global configure
+genai_client = None
+if GOOGLE_API_KEY:
+    try:
         genai_client = google_genai_sdk.Client(api_key=GOOGLE_API_KEY)
-    else:
-        genai_client = None # Will cause errors if used, but prevents crash on startup
-        logging.warning("Gemini API client not initialized due to missing API key.")
-except Exception as e:
-    genai_client = None
-    logging.error(f"Failed to initialize Gemini API client: {e}")
+        logging.info("Google GenAI SDK Client initialized successfully.")
+    except Exception as e:
+        logging.error(f"Failed to initialize Google GenAI SDK Client: {e}")
+else:
+    logging.warning("Gemini API client not initialized due to missing API key.")
 
 # Flask App Setup
 app = Flask(__name__)
@@ -46,17 +39,15 @@ ALLOWED_EXTENSIONS = {
     'txt', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'json', # Documents
     'py', 'js', 'html', 'css', 'java', 'c', 'cpp', 'php', 'rb', 'swift', 'kt', 'go', 'ts', 'md' # Code
 }
-# Model names in google-genai might be like 'gemini-1.5-flash-001' or 'models/gemini-1.5-flash-latest'
-# The 'models/' prefix is often needed for tuned models or specific versions.
-# For standard models, often the short name is fine.
-# Let's use the one compatible with chat and general generation from the new SDK context.
-MODEL_NAME_CHAT = 'gemini-2.5-flash-preview-04-17' # Model for chat
-MODEL_NAME_FILES = 'gemini-2.5-flash-preview-04-17' # Model for file processing, often same as chat
+MODEL_NAME_CHAT = 'gemini-2.5-flash-preview-04-17' # Using a specific version for stability
 
 # Ensure upload folder exists
 if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+    try:
+        os.makedirs(UPLOAD_FOLDER)
+    except OSError as e:
+        logging.error(f"Could not create upload folder {UPLOAD_FOLDER}: {e}")
+
 
 # System Prompt for the AI
 SYSTEM_PROMPT = """You are a helpful and versatile AI assistant.
@@ -90,14 +81,6 @@ SAFETY_SETTINGS = [
 # Tool for Google Search
 GOOGLE_SEARCH_TOOL = [google_genai_types.Tool(google_search_retrieval=google_genai_types.GoogleSearchRetrieval())]
 
-# Generation Configuration
-DEFAULT_GENERATION_CONFIG = google_genai_types.GenerateContentConfig(
-    # system_instruction=SYSTEM_PROMPT, # System instruction often better as first part of 'contents' for chat
-    safety_settings=SAFETY_SETTINGS,
-    tools=GOOGLE_SEARCH_TOOL,
-    # temperature=0.7, # Optional: Adjust creativity
-    # max_output_tokens=2048, # Optional: Adjust max response length
-)
 
 # --- Helper Functions ---
 def allowed_file(filename):
@@ -114,19 +97,28 @@ def is_valid_image(filepath):
         logging.warning(f"Invalid image file {filepath}: {e}")
         return False
 
+def cleanup_temp_file(filepath, context_message=""):
+    if filepath and os.path.exists(filepath):
+        try:
+            os.remove(filepath)
+            logging.info(f"Temporary file '{filepath}' deleted. {context_message}")
+        except Exception as e_del:
+            logging.error(f"Error deleting temporary file '{filepath}' {context_message}: {e_del}")
+
+
 # --- API Routes ---
 @app.route('/chat', methods=['POST'])
 def chat_handler():
     if not genai_client:
         return jsonify({"error": "Gemini API client not initialized on the server. Check API key."}), 500
 
+    temp_file_path = None # Initialize here to ensure it's in scope for finally/except blocks
     try:
         prompt_text = request.form.get('prompt', '')
         history_json = request.form.get('history', '[]')
 
         uploaded_file_details_for_frontend = None
-        gemini_sdk_uploaded_file_object = None # This will be the object from client.files.upload
-        temp_file_path = None
+        gemini_sdk_uploaded_file_object = None
 
         # 1. Handle File Upload using google-genai client
         if 'file' in request.files:
@@ -140,25 +132,23 @@ def chat_handler():
                 file_ext = filename.rsplit('.', 1)[1].lower()
                 if file_ext in {'png', 'jpg', 'jpeg', 'webp', 'heic', 'heif'}:
                     if not is_valid_image(temp_file_path):
-                        os.remove(temp_file_path)
+                        cleanup_temp_file(temp_file_path, "Context: Invalid image uploaded.")
                         return jsonify({"error": f"Uploaded file '{filename}' is not a valid or supported image."}), 400
 
                 logging.info(f"Uploading '{filename}' to Gemini using google-genai SDK...")
-                # Use client.files.upload
                 gemini_sdk_uploaded_file_object = genai_client.files.upload(path=temp_file_path, display_name=filename)
                 logging.info(f"File '{filename}' uploaded. URI: {gemini_sdk_uploaded_file_object.uri}, Name: {gemini_sdk_uploaded_file_object.name}")
 
                 uploaded_file_details_for_frontend = {
-                    "uri": gemini_sdk_uploaded_file_object.uri, # URI to store in frontend history
+                    "uri": gemini_sdk_uploaded_file_object.uri,
                     "mime_type": gemini_sdk_uploaded_file_object.mime_type,
-                    "name": filename # Original filename for display
+                    "name": filename
                 }
-            elif file and file.filename:
+            elif file and file.filename: # File present but not allowed type
                 logging.warning(f"File type not allowed: {file.filename}")
                 return jsonify({"error": f"File type not allowed: {file.filename}. Permitted: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
 
         # 2. Prepare History for google-genai SDK
-        # History for google-genai's chat needs to be list[types.Content]
         try:
             frontend_history = json.loads(history_json)
         except json.JSONDecodeError:
@@ -166,13 +156,8 @@ def chat_handler():
             return jsonify({"error": "Invalid history format."}), 400
 
         gemini_chat_history = []
-        # Add system prompt as the first "user" or "system" message if chat.create doesn't take it directly
-        # For now, we'll pass system_instruction in GenerateContentConfig of send_message.
-        # Alternatively, a Content object with the system prompt can be the first item if supported.
-        # Let's assume system_instruction in config is sufficient for chat.
-
         for entry in frontend_history:
-            role = entry.get('role') # Should be 'user' or 'model'
+            role = entry.get('role')
             parts_data = entry.get('parts', [])
             if not role or not parts_data:
                 logging.warning(f"Skipping invalid history entry: {entry}")
@@ -180,12 +165,11 @@ def chat_handler():
 
             current_parts_for_sdk = []
             for part_item in parts_data:
-                if 'text' in part_item and part_item['text']:
-                    current_parts_for_sdk.append(google_genai_types.Part.from_text(part_item['text']))
-                elif 'file_data' in part_item: # This is from frontend's history storage
+                if 'text' in part_item and part_item['text'] is not None: # Check for None too
+                    current_parts_for_sdk.append(google_genai_types.Part.from_text(text=part_item['text'])) # CORRECTED
+                elif 'file_data' in part_item:
                     fd = part_item['file_data']
                     if fd.get('file_uri') and fd.get('mime_type'):
-                        # Recreate Part from URI for files previously uploaded
                         current_parts_for_sdk.append(google_genai_types.Part.from_uri(uri=fd['file_uri'], mime_type=fd['mime_type']))
                     else:
                         logging.warning(f"Skipping history file_data with missing uri or mime_type: {fd}")
@@ -193,85 +177,75 @@ def chat_handler():
             if current_parts_for_sdk:
                 gemini_chat_history.append(google_genai_types.Content(role=role, parts=current_parts_for_sdk))
 
-        # 3. Initialize Chat Session (or use generate_content for simplicity if chat object is complex here)
-        # The google-genai SDK's `client.chats.create` is for persistent chat objects.
-        # For stateless request/response with history, `client.models.generate_content` is often simpler.
-        # Let's use `client.models.generate_content` and manage history manually for now,
-        # as it more directly maps to the previous structure and clearly takes system_instruction.
-        # If true multi-turn stateful chat on server is needed, client.chats.create is the way.
-
-        # Construct full contents for the current call, including history and new prompt
+        # 3. Construct full contents for the current API call
         contents_for_generate = []
-
-        # Add system prompt as the first content if not using it in config, or if model prefers it this way
-        # Some models work better with system prompt as first Content object.
-        # For `generate_content`, system_instruction in config is usually fine.
-        # Let's add it to history to be explicit if system_instruction in config doesn't cover all cases.
-        # contents_for_generate.append(google_genai_types.Content(role='user', parts=[google_genai_types.Part.from_text(f"[SYSTEM PROMPT]\n{SYSTEM_PROMPT}")]))
-        # No, system_instruction in GenerateContentConfig is the correct place for google-genai
-
-        contents_for_generate.extend(gemini_chat_history) # Add the past conversation
+        contents_for_generate.extend(gemini_chat_history)
 
         # 4. Prepare current user message parts for google-genai SDK
         current_user_message_parts_sdk = []
-        if prompt_text:
-            current_user_message_parts_sdk.append(google_genai_types.Part.from_text(prompt_text))
-        if gemini_sdk_uploaded_file_object: # This is the File object from client.files.upload
-            # Convert the File object to a Part for generate_content
+        if prompt_text: # Ensure prompt_text is not empty before adding
+            current_user_message_parts_sdk.append(google_genai_types.Part.from_text(text=prompt_text)) # CORRECTED
+        if gemini_sdk_uploaded_file_object:
             current_user_message_parts_sdk.append(google_genai_types.Part.from_uri(
                 uri=gemini_sdk_uploaded_file_object.uri,
                 mime_type=gemini_sdk_uploaded_file_object.mime_type
             ))
 
-
-        if not current_user_message_parts_sdk:
-            if temp_file_path and os.path.exists(temp_file_path):
-                os.remove(temp_file_path)
-            return jsonify({"error": "Cannot send an empty message."}), 400
+        if not current_user_message_parts_sdk: # No text and no file for the current turn
+            cleanup_temp_file(temp_file_path, "Context: Empty message sent by user.") # Clean up if file was uploaded but no text prompt
+            return jsonify({"error": "Cannot send an empty message (no text or file provided for the current turn)."}), 400
 
         contents_for_generate.append(google_genai_types.Content(role='user', parts=current_user_message_parts_sdk))
 
         # 5. Send Message to Gemini using google-genai
-        logging.info(f"Sending to Gemini with google-genai. History length: {len(gemini_chat_history)}, Prompt: '{prompt_text[:50]}...', File: {gemini_sdk_uploaded_file_object.name if gemini_sdk_uploaded_file_object else 'None'}")
+        logging.info(f"Sending to Gemini with google-genai. Full contents length: {len(contents_for_generate)}, Prompt: '{prompt_text[:50]}...', File: {gemini_sdk_uploaded_file_object.name if gemini_sdk_uploaded_file_object else 'None'}")
 
-        # Create a specific generation config for this call, including the system prompt
         current_generation_config = google_genai_types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT, # Apply system prompt here
+            system_instruction=SYSTEM_PROMPT,
             safety_settings=SAFETY_SETTINGS,
             tools=GOOGLE_SEARCH_TOOL
         )
 
         response = genai_client.models.generate_content(
-            model=MODEL_NAME_CHAT, # Or a more specific model name like 'gemini-1.5-flash-001'
+            model=MODEL_NAME_CHAT,
             contents=contents_for_generate,
             config=current_generation_config
         )
         logging.info("Received response from Gemini.")
 
         # 6. Process and Return Response
+
+        # Check for blocking in the response object itself first
+        if hasattr(response, 'prompt_feedback') and response.prompt_feedback and \
+           hasattr(response.prompt_feedback, 'block_reason') and response.prompt_feedback.block_reason:
+            block_reason_name = response.prompt_feedback.block_reason.name if hasattr(response.prompt_feedback.block_reason, 'name') else str(response.prompt_feedback.block_reason)
+            logging.error(f"Prompt blocked by Gemini. Reason: {block_reason_name}")
+            safety_ratings_info = []
+            if hasattr(response.prompt_feedback, 'safety_ratings') and response.prompt_feedback.safety_ratings:
+                for rating in response.prompt_feedback.safety_ratings:
+                    rating_category_name = rating.category.name if hasattr(rating.category, 'name') else str(rating.category)
+                    rating_probability_name = rating.probability.name if hasattr(rating.probability, 'name') else str(rating.probability)
+                    safety_ratings_info.append(f"{rating_category_name}: {rating_probability_name}")
+            error_message = f"Error: Your request was blocked due to content policy ({block_reason_name})."
+            if safety_ratings_info:
+                error_message += f" Details: {'; '.join(safety_ratings_info)}"
+            cleanup_temp_file(temp_file_path, "Context: Prompt blocked by Gemini.")
+            return jsonify({"error": error_message}), 400
+
         reply_text = ""
         if response.parts:
             for part in response.parts:
                 if hasattr(part, 'text'):
                     reply_text += part.text
-        elif hasattr(response, 'text'): # Fallback for simpler responses or if response object is directly text container
+        elif hasattr(response, 'text') and response.text: # Check if response.text exists and is not empty
              reply_text = response.text
-        else:
-            logging.warning("Gemini response had no processable parts or text.")
-            # Check for blocked response
-            if response.prompt_feedback and response.prompt_feedback.block_reason:
-                block_reason = response.prompt_feedback.block_reason.name
-                logging.error(f"Prompt blocked by Gemini. Reason: {block_reason}")
-                safety_ratings_info = []
-                if response.prompt_feedback.safety_ratings: # Check if safety_ratings exists
-                    for rating in response.prompt_feedback.safety_ratings:
-                        safety_ratings_info.append(f"{rating.category.name}: {rating.probability.name}")
-                error_message = f"Error: Your request was blocked due to content policy ({block_reason})."
-                if safety_ratings_info:
-                    error_message += f" Details: {'; '.join(safety_ratings_info)}"
-                return jsonify({"error": error_message}), 400
-            reply_text = "I'm sorry, I couldn't generate a response for that."
-
+        else: # No parts and no direct text, or response.text is empty
+            logging.warning("Gemini response had no processable text parts or direct text attribute was empty.")
+            # This might happen if the model legitimately has nothing to say, or if it's a tool call response without text.
+            # For a chat bot, usually some text is expected. If it's an empty but valid response, return it as such.
+            # If we expect text and get none, it might be an implicit issue or model preference.
+            # For now, we'll consider it an empty valid reply if not blocked and no error raised.
+            reply_text = "" # Or "I'm sorry, I don't have a text response for that." if you prefer
 
         response_data = {"reply": reply_text}
         if uploaded_file_details_for_frontend:
@@ -279,42 +253,36 @@ def chat_handler():
 
         return jsonify(response_data)
 
-    except google_genai_errors.BlockedPromptError as e: # Specific error for blocked prompts
-        logging.error(f"BlockedPromptError (google-genai): {e}")
-        error_message = "Error: Your request was blocked by the content safety filter."
-        # The 'e' object itself might contain useful details, or you might need to inspect its properties.
-        return jsonify({"error": error_message}), 400
-    except google_genai_errors.APIError as e: # General API errors from google-genai
-        logging.error(f"APIError (google-genai): Code {e.code if hasattr(e, 'code') else 'N/A'} - {e.message if hasattr(e, 'message') else str(e)}")
-        if hasattr(e, 'code') and e.code == 403: # Example: Permission denied
-             return jsonify({"error": "Server-side API key issue (Permission Denied). Please check key and enabled APIs."}), 500
-        elif "API key not valid" in str(e) or (hasattr(e, 'code') and e.code == 401): # Unauthorized
-            return jsonify({"error": "Server-side API key is invalid or not authorized."}), 500
-        return jsonify({"error": f"An API error occurred: {str(e)}"}), 500
+    except google_genai_errors.InvalidArgumentError as e:
+        logging.error(f"InvalidArgumentError (google-genai): {e}")
+        cleanup_temp_file(temp_file_path, "Context: InvalidArgumentError caught.")
+        return jsonify({"error": f"Invalid request: Your prompt or content may have been blocked or is invalid. Details: {str(e)}"}), 400
+    except google_genai_errors.GoogleAPIError as e:
+        logging.error(f"GoogleAPIError (google-genai): {e}")
+        cleanup_temp_file(temp_file_path, "Context: GoogleAPIError caught.")
+        return jsonify({"error": f"An API error occurred with the AI service: {str(e)}"}), 500
     except Exception as e:
-        logging.exception("An unexpected error occurred in /chat") # Logs traceback
-        return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
-
+        logging.exception("An unexpected error occurred in /chat")
+        cleanup_temp_file(temp_file_path, "Context: General Exception caught.")
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
     finally:
-        # 7. Cleanup Temporary File
-        if temp_file_path and os.path.exists(temp_file_path):
-            try:
-                os.remove(temp_file_path)
-                logging.info(f"Temporary file '{temp_file_path}' deleted.")
-            except Exception as e:
-                logging.error(f"Error deleting temporary file '{temp_file_path}': {e}")
+        # Final cleanup attempt for the temp file, regardless of what happened in try/except
+        # This primarily catches cases where an unhandled exception might occur before specific cleanup
+        # or if the file wasn't cleaned up in an error branch for some reason.
+        cleanup_temp_file(temp_file_path, "Context: Finally block.")
+
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+    app_logger = logging.getLogger(__name__) # Use a named logger for the app itself
+
     if not GOOGLE_API_KEY:
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print("!!! WARNING: GOOGLE_API_KEY is not set in environment variables or .env.   !!!")
-        print("!!! The application will likely not function correctly.                    !!!")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        app_logger.critical("CRITICAL: GOOGLE_API_KEY is not set. The application will not function.")
     elif not genai_client:
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print("!!! WARNING: Gemini API client failed to initialize. Check API key & logs. !!!")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        app_logger.critical("CRITICAL: Gemini API client failed to initialize. Check API key & logs.")
     else:
-        print("Gemini client initialized. Using GOOGLE_API_KEY from environment.")
-    app.run(debug=True, port=5000)
+        app_logger.info("Flask app starting. Gemini client initialized.")
+
+    # Consider PORT from environment for deployment flexibility (e.g. Render sets PORT env var)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(debug=True, host='0.0.0.0', port=port) # host='0.0.0.0' is important for Render
