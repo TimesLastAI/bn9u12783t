@@ -6,13 +6,13 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from google import genai as google_genai_sdk
 from google.genai import types as google_genai_types
-from google.genai import errors as google_genai_errors # For error handling
+from google.genai import errors as google_genai_errors
 from dotenv import load_dotenv
 from PIL import Image
 
 # --- Configuration ---
 load_dotenv()
-GOOGLE_API_KEY = "AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo"
+GOOGLE_API_KEY = os.getenv("AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo")
 
 if not GOOGLE_API_KEY:
     logging.error("CRITICAL: GOOGLE_API_KEY not found in environment variables or .env file. Please set it.")
@@ -31,7 +31,7 @@ app = Flask(__name__)
 CORS(app)
 
 UPLOAD_FOLDER = 'uploads'
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER # Ensure Flask config is set
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {
     'png', 'jpg', 'jpeg', 'webp', 'heic', 'heif',
     'txt', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'json',
@@ -50,7 +50,7 @@ Your primary goal is to provide accurate, informative, and engaging responses.
 When a user uploads a file, analyze its content in conjunction with their prompt.
 Be polite and conversational. Structure your answers clearly. If generating code, use markdown code blocks.
 If you are unsure about something or cannot fulfill a request, explain why clearly and politely.
-""" # Make sure your full prompt is here
+"""
 
 SAFETY_SETTINGS = [
     google_genai_types.SafetySetting(category=google_genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=google_genai_types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
@@ -59,7 +59,7 @@ SAFETY_SETTINGS = [
     google_genai_types.SafetySetting(category=google_genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=google_genai_types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
 ]
 
-GOOGLE_SEARCH_TOOL = [] # Search grounding disabled as per previous error
+GOOGLE_SEARCH_TOOL = []
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -68,7 +68,7 @@ def is_valid_image(filepath):
     try:
         img = Image.open(filepath)
         img.verify()
-        Image.open(filepath).load() # Re-open after verify
+        Image.open(filepath).load()
         return True
     except Exception:
         return False
@@ -94,21 +94,26 @@ def chat_handler():
         gemini_sdk_uploaded_file_object = None
 
         if 'file' in request.files:
-            file = request.files['file']
-            if file and file.filename and allowed_file(file.filename):
-                filename = secure_filename(file.filename)
+            file_from_request = request.files['file'] # Renamed to avoid conflict with 'file' parameter name
+            if file_from_request and file_from_request.filename and allowed_file(file_from_request.filename):
+                filename = secure_filename(file_from_request.filename)
                 temp_file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                file.save(temp_file_path)
+                file_from_request.save(temp_file_path) # Use the renamed variable
                 logging.info(f"File '{filename}' saved to '{temp_file_path}'")
                 if filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'webp', 'heic', 'heif'} and not is_valid_image(temp_file_path):
                     cleanup_temp_file(temp_file_path, "Context: Invalid image uploaded.")
                     return jsonify({"error": f"Uploaded file '{filename}' is not a valid image."}), 400
                 
-                gemini_sdk_uploaded_file_object = genai_client.files.upload(path=temp_file_path, display_name=filename)
-                logging.info(f"File '{filename}' uploaded. URI: {gemini_sdk_uploaded_file_object.uri}")
+                logging.info(f"Uploading '{filename}' to Gemini using google-genai SDK...")
+                # MODIFIED: Changed 'path=' to 'file='
+                gemini_sdk_uploaded_file_object = genai_client.files.upload(
+                    file=temp_file_path, # Use file= for the path string
+                    display_name=filename
+                )
+                logging.info(f"File '{filename}' uploaded. URI: {gemini_sdk_uploaded_file_object.uri}, Name: {gemini_sdk_uploaded_file_object.name}")
                 uploaded_file_details_for_frontend = {"uri": gemini_sdk_uploaded_file_object.uri, "mime_type": gemini_sdk_uploaded_file_object.mime_type, "name": filename}
-            elif file and file.filename:
-                return jsonify({"error": f"File type not allowed: {file.filename}."}), 400
+            elif file_from_request and file_from_request.filename: # File present but not allowed type
+                return jsonify({"error": f"File type not allowed: {file_from_request.filename}."}), 400
 
         frontend_history = json.loads(history_json)
         gemini_chat_history = []
@@ -154,16 +159,14 @@ def chat_handler():
             cleanup_temp_file(temp_file_path, "Context: Prompt blocked.")
             return jsonify({"error": f"Request blocked due to content policy ({block_reason})."}), 400
 
-        # MODIFIED: How to extract reply_text from GenerateContentResponse
         reply_text = ""
         if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
             for part in response.candidates[0].content.parts:
-                if hasattr(part, 'text') and part.text: # Make sure part.text is not None or empty if that's desired
+                if hasattr(part, 'text') and part.text:
                     reply_text += part.text
-        elif hasattr(response, 'text') and response.text: # Fallback for direct .text if available
+        elif hasattr(response, 'text') and response.text:
             reply_text = response.text
-        # If neither, reply_text remains "" (empty string)
-
+        
         response_data = {"reply": reply_text}
         if uploaded_file_details_for_frontend:
             response_data["uploaded_file_details"] = uploaded_file_details_for_frontend
@@ -174,7 +177,7 @@ def chat_handler():
         error_message = f"Invalid request: {e.message}" if hasattr(e, 'message') and e.message else f"A client-side API error occurred: {str(e)}"
         cleanup_temp_file(temp_file_path, f"Context: ClientError - {error_message}")
         return jsonify({"error": error_message}), 400
-    except google_genai_errors.APIError as e: # MODIFIED: Catching the base APIError
+    except google_genai_errors.APIError as e:
         logging.error(f"APIError (google-genai): {e}")
         cleanup_temp_file(temp_file_path, "Context: APIError caught.")
         return jsonify({"error": f"An API error occurred: {str(e)}"}), 500
@@ -182,9 +185,14 @@ def chat_handler():
         logging.error(f"JSONDecodeError for history: {e}")
         return jsonify({"error": f"Invalid history format sent from client: {str(e)}"}), 400
     except Exception as e:
-        logging.exception("An unexpected error occurred in /chat")
+        logging.exception("An unexpected error occurred in /chat") # This will log the full traceback
+        # Send back the specific error message if it's from our known file upload issue
+        if "Files.upload() got an unexpected keyword argument 'path'" in str(e):
+             actual_error_message = "Files.upload() got an unexpected keyword argument 'path'"
+        else:
+             actual_error_message = str(e)
         cleanup_temp_file(temp_file_path, "Context: General Exception caught.")
-        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
+        return jsonify({"error": f"An unexpected server error occurred: {actual_error_message}"}), 500
     finally:
         cleanup_temp_file(temp_file_path, "Context: Finally block.")
 
@@ -196,4 +204,4 @@ if __name__ == '__main__':
     else:
         app_logger.info("Flask app starting. Gemini client initialized.")
     port = int(os.environ.get("PORT", 5000))
-    app.run(debug=False, host='0.0.0.0', port=port) # debug=False for Render
+    app.run(debug=False, host='0.0.0.0', port=port)
