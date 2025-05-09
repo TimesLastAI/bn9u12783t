@@ -105,16 +105,14 @@ def chat_handler():
                     return jsonify({"error": f"Uploaded file '{filename}' is not a valid image."}), 400
                 
                 logging.info(f"Uploading '{filename}' to Gemini using google-genai SDK...")
-                # MODIFIED: Removed 'display_name=' argument
                 gemini_sdk_uploaded_file_object = genai_client.files.upload(
                     file=temp_file_path
                 )
-                # The returned File object will have a .name (often a generated ID) and .display_name (often derived from filename)
                 logging.info(f"File '{filename}' uploaded. SDK File Name: {gemini_sdk_uploaded_file_object.name}, Display Name: {gemini_sdk_uploaded_file_object.display_name}, URI: {gemini_sdk_uploaded_file_object.uri}")
                 uploaded_file_details_for_frontend = {
                     "uri": gemini_sdk_uploaded_file_object.uri,
                     "mime_type": gemini_sdk_uploaded_file_object.mime_type,
-                    "name": filename # Send back the original filename for frontend display
+                    "name": filename
                 }
             elif file_from_request and file_from_request.filename:
                 return jsonify({"error": f"File type not allowed: {file_from_request.filename}."}), 400
@@ -130,7 +128,8 @@ def chat_handler():
                     current_parts_for_sdk.append(google_genai_types.Part.from_text(text=item['text']))
                 elif 'file_data' in item and item['file_data'].get('file_uri') and item['file_data'].get('mime_type'):
                     fd = item['file_data']
-                    current_parts_for_sdk.append(google_genai_types.Part.from_uri(uri=fd['file_uri'], mime_type=fd['mime_type']))
+                    # MODIFIED: uri to file_uri
+                    current_parts_for_sdk.append(google_genai_types.Part.from_uri(file_uri=fd['file_uri'], mime_type=fd['mime_type']))
             if current_parts_for_sdk:
                 gemini_chat_history.append(google_genai_types.Content(role=role, parts=current_parts_for_sdk))
 
@@ -138,10 +137,11 @@ def chat_handler():
         current_user_message_parts_sdk = []
         if prompt_text:
             current_user_message_parts_sdk.append(google_genai_types.Part.from_text(text=prompt_text))
-        if gemini_sdk_uploaded_file_object: # This is the File object returned by client.files.upload
+        if gemini_sdk_uploaded_file_object:
+            # MODIFIED: uri to file_uri
             current_user_message_parts_sdk.append(google_genai_types.Part.from_uri(
-                uri=gemini_sdk_uploaded_file_object.uri, # Use the URI from the uploaded file object
-                mime_type=gemini_sdk_uploaded_file_object.mime_type # And its MIME type
+                file_uri=gemini_sdk_uploaded_file_object.uri, 
+                mime_type=gemini_sdk_uploaded_file_object.mime_type
             ))
 
         if not current_user_message_parts_sdk:
