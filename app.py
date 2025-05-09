@@ -94,25 +94,29 @@ def chat_handler():
         gemini_sdk_uploaded_file_object = None
 
         if 'file' in request.files:
-            file_from_request = request.files['file'] # Renamed to avoid conflict with 'file' parameter name
+            file_from_request = request.files['file']
             if file_from_request and file_from_request.filename and allowed_file(file_from_request.filename):
                 filename = secure_filename(file_from_request.filename)
                 temp_file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                file_from_request.save(temp_file_path) # Use the renamed variable
+                file_from_request.save(temp_file_path)
                 logging.info(f"File '{filename}' saved to '{temp_file_path}'")
                 if filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'webp', 'heic', 'heif'} and not is_valid_image(temp_file_path):
                     cleanup_temp_file(temp_file_path, "Context: Invalid image uploaded.")
                     return jsonify({"error": f"Uploaded file '{filename}' is not a valid image."}), 400
                 
                 logging.info(f"Uploading '{filename}' to Gemini using google-genai SDK...")
-                # MODIFIED: Changed 'path=' to 'file='
+                # MODIFIED: Removed 'display_name=' argument
                 gemini_sdk_uploaded_file_object = genai_client.files.upload(
-                    file=temp_file_path, # Use file= for the path string
-                    display_name=filename
+                    file=temp_file_path
                 )
-                logging.info(f"File '{filename}' uploaded. URI: {gemini_sdk_uploaded_file_object.uri}, Name: {gemini_sdk_uploaded_file_object.name}")
-                uploaded_file_details_for_frontend = {"uri": gemini_sdk_uploaded_file_object.uri, "mime_type": gemini_sdk_uploaded_file_object.mime_type, "name": filename}
-            elif file_from_request and file_from_request.filename: # File present but not allowed type
+                # The returned File object will have a .name (often a generated ID) and .display_name (often derived from filename)
+                logging.info(f"File '{filename}' uploaded. SDK File Name: {gemini_sdk_uploaded_file_object.name}, Display Name: {gemini_sdk_uploaded_file_object.display_name}, URI: {gemini_sdk_uploaded_file_object.uri}")
+                uploaded_file_details_for_frontend = {
+                    "uri": gemini_sdk_uploaded_file_object.uri,
+                    "mime_type": gemini_sdk_uploaded_file_object.mime_type,
+                    "name": filename # Send back the original filename for frontend display
+                }
+            elif file_from_request and file_from_request.filename:
                 return jsonify({"error": f"File type not allowed: {file_from_request.filename}."}), 400
 
         frontend_history = json.loads(history_json)
@@ -134,8 +138,11 @@ def chat_handler():
         current_user_message_parts_sdk = []
         if prompt_text:
             current_user_message_parts_sdk.append(google_genai_types.Part.from_text(text=prompt_text))
-        if gemini_sdk_uploaded_file_object:
-            current_user_message_parts_sdk.append(google_genai_types.Part.from_uri(uri=gemini_sdk_uploaded_file_object.uri, mime_type=gemini_sdk_uploaded_file_object.mime_type))
+        if gemini_sdk_uploaded_file_object: # This is the File object returned by client.files.upload
+            current_user_message_parts_sdk.append(google_genai_types.Part.from_uri(
+                uri=gemini_sdk_uploaded_file_object.uri, # Use the URI from the uploaded file object
+                mime_type=gemini_sdk_uploaded_file_object.mime_type # And its MIME type
+            ))
 
         if not current_user_message_parts_sdk:
             cleanup_temp_file(temp_file_path, "Context: Empty message.")
@@ -185,12 +192,8 @@ def chat_handler():
         logging.error(f"JSONDecodeError for history: {e}")
         return jsonify({"error": f"Invalid history format sent from client: {str(e)}"}), 400
     except Exception as e:
-        logging.exception("An unexpected error occurred in /chat") # This will log the full traceback
-        # Send back the specific error message if it's from our known file upload issue
-        if "Files.upload() got an unexpected keyword argument 'path'" in str(e):
-             actual_error_message = "Files.upload() got an unexpected keyword argument 'path'"
-        else:
-             actual_error_message = str(e)
+        logging.exception("An unexpected error occurred in /chat")
+        actual_error_message = str(e)
         cleanup_temp_file(temp_file_path, "Context: General Exception caught.")
         return jsonify({"error": f"An unexpected server error occurred: {actual_error_message}"}), 500
     finally:
