@@ -4,10 +4,11 @@ import logging
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
-from google import genai as google_genai_sdk # Renamed to avoid conflict if old one was around
+from google import genai as google_genai_sdk
 from google.genai import types as google_genai_types
-from google.genai import errors as google_genai_errors # For error handlingfrom dotenv import load_dotenv
-from PIL import Image # For validating image files
+from google.genai import errors as google_genai_errors
+from dotenv import load_dotenv  # <--- MAKE SURE THIS LINE IS HERE AND UNCOMMENTED
+from PIL import Image
 
 # --- Configuration ---
 load_dotenv()
