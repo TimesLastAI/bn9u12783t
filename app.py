@@ -50,8 +50,8 @@ ALLOWED_EXTENSIONS = {
 # The 'models/' prefix is often needed for tuned models or specific versions.
 # For standard models, often the short name is fine.
 # Let's use the one compatible with chat and general generation from the new SDK context.
-MODEL_NAME_CHAT = 'gemini-1.5-flash-latest' # Model for chat
-MODEL_NAME_FILES = 'gemini-1.5-flash-latest' # Model for file processing, often same as chat
+MODEL_NAME_CHAT = 'gemini-2.5-flash-preview-04-17' # Model for chat
+MODEL_NAME_FILES = 'gemini-2.5-flash-preview-04-17' # Model for file processing, often same as chat
 
 # Ensure upload folder exists
 if not os.path.exists(UPLOAD_FOLDER):
