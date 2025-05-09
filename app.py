@@ -6,13 +6,13 @@ from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from google import genai as google_genai_sdk
 from google.genai import types as google_genai_types
-from google.genai import errors as google_genai_errors
+from google.genai import errors as google_genai_errors # For error handling
 from dotenv import load_dotenv
 from PIL import Image
 
 # --- Configuration ---
 load_dotenv()
-GOOGLE_API_KEY = ("AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo")
+GOOGLE_API_KEY = "AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo"
 
 if not GOOGLE_API_KEY:
     logging.error("CRITICAL: GOOGLE_API_KEY not found in environment variables or .env file. Please set it.")
@@ -31,6 +31,7 @@ app = Flask(__name__)
 CORS(app)
 
 UPLOAD_FOLDER = 'uploads'
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER # Ensure Flask config is set
 ALLOWED_EXTENSIONS = {
     'png', 'jpg', 'jpeg', 'webp', 'heic', 'heif',
     'txt', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'json',
@@ -44,7 +45,12 @@ if not os.path.exists(UPLOAD_FOLDER):
     except OSError as e:
         logging.error(f"Could not create upload folder {UPLOAD_FOLDER}: {e}")
 
-SYSTEM_PROMPT = """You are a helpful and versatile AI assistant... (your full prompt)""" # Keep your system prompt
+SYSTEM_PROMPT = """You are a helpful and versatile AI assistant.
+Your primary goal is to provide accurate, informative, and engaging responses.
+When a user uploads a file, analyze its content in conjunction with their prompt.
+Be polite and conversational. Structure your answers clearly. If generating code, use markdown code blocks.
+If you are unsure about something or cannot fulfill a request, explain why clearly and politely.
+""" # Make sure your full prompt is here
 
 SAFETY_SETTINGS = [
     google_genai_types.SafetySetting(category=google_genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=google_genai_types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
@@ -53,20 +59,19 @@ SAFETY_SETTINGS = [
     google_genai_types.SafetySetting(category=google_genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=google_genai_types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
 ]
 
-# MODIFICATION: Disable Google Search Tool as it's not supported by the API for this model/config
-GOOGLE_SEARCH_TOOL = []
-# If you wanted to enable it later and it was supported:
-# GOOGLE_SEARCH_TOOL = [google_genai_types.Tool(google_search_retrieval=google_genai_types.GoogleSearchRetrieval())]
+GOOGLE_SEARCH_TOOL = [] # Search grounding disabled as per previous error
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def is_valid_image(filepath):
     try:
-        Image.open(filepath).verify()
+        img = Image.open(filepath)
+        img.verify()
         Image.open(filepath).load() # Re-open after verify
         return True
-    except Exception: return False
+    except Exception:
+        return False
 
 def cleanup_temp_file(filepath, context_message=""):
     if filepath and os.path.exists(filepath):
@@ -120,7 +125,7 @@ def chat_handler():
             if current_parts_for_sdk:
                 gemini_chat_history.append(google_genai_types.Content(role=role, parts=current_parts_for_sdk))
 
-        contents_for_generate = list(gemini_chat_history) # Start with a copy
+        contents_for_generate = list(gemini_chat_history)
         current_user_message_parts_sdk = []
         if prompt_text:
             current_user_message_parts_sdk.append(google_genai_types.Part.from_text(text=prompt_text))
@@ -136,7 +141,7 @@ def chat_handler():
         current_generation_config = google_genai_types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             safety_settings=SAFETY_SETTINGS,
-            tools=GOOGLE_SEARCH_TOOL # Will be empty list if disabled
+            tools=GOOGLE_SEARCH_TOOL
         )
         response = genai_client.models.generate_content(
             model=MODEL_NAME_CHAT, contents=contents_for_generate, config=current_generation_config
@@ -146,29 +151,34 @@ def chat_handler():
         if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
             block_reason = response.prompt_feedback.block_reason.name if hasattr(response.prompt_feedback.block_reason, 'name') else str(response.prompt_feedback.block_reason)
             logging.error(f"Prompt blocked. Reason: {block_reason}")
-            # ... (more detailed safety rating logging if needed) ...
             cleanup_temp_file(temp_file_path, "Context: Prompt blocked.")
             return jsonify({"error": f"Request blocked due to content policy ({block_reason})."}), 400
 
-        reply_text = "".join(part.text for part in response.parts if hasattr(part, 'text')) if response.parts else (response.text if hasattr(response, 'text') else "")
+        # MODIFIED: How to extract reply_text from GenerateContentResponse
+        reply_text = ""
+        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'text') and part.text: # Make sure part.text is not None or empty if that's desired
+                    reply_text += part.text
+        elif hasattr(response, 'text') and response.text: # Fallback for direct .text if available
+            reply_text = response.text
+        # If neither, reply_text remains "" (empty string)
 
         response_data = {"reply": reply_text}
         if uploaded_file_details_for_frontend:
             response_data["uploaded_file_details"] = uploaded_file_details_for_frontend
         return jsonify(response_data)
 
-    except google_genai_errors.ClientError as e: # Catches 4xx type errors like INVALID_ARGUMENT
+    except google_genai_errors.ClientError as e:
         logging.error(f"ClientError (google-genai): Status {e.status_code if hasattr(e, 'status_code') else 'N/A'} - {e}")
         error_message = f"Invalid request: {e.message}" if hasattr(e, 'message') and e.message else f"A client-side API error occurred: {str(e)}"
-        if "Search Grounding is not supported" in str(e):
-            error_message = "Invalid request: Search Grounding is not supported by the current model configuration."
         cleanup_temp_file(temp_file_path, f"Context: ClientError - {error_message}")
         return jsonify({"error": error_message}), 400
-    except google_genai_errors.GoogleAPIError as e: # For other API errors (e.g., 5xx from server)
-        logging.error(f"GoogleAPIError (google-genai): {e}")
-        cleanup_temp_file(temp_file_path, "Context: GoogleAPIError caught.")
-        return jsonify({"error": f"An API error occurred with the AI service: {str(e)}"}), 500
-    except json.JSONDecodeError as e: # Specifically for history parsing
+    except google_genai_errors.APIError as e: # MODIFIED: Catching the base APIError
+        logging.error(f"APIError (google-genai): {e}")
+        cleanup_temp_file(temp_file_path, "Context: APIError caught.")
+        return jsonify({"error": f"An API error occurred: {str(e)}"}), 500
+    except json.JSONDecodeError as e:
         logging.error(f"JSONDecodeError for history: {e}")
         return jsonify({"error": f"Invalid history format sent from client: {str(e)}"}), 400
     except Exception as e:
@@ -186,4 +196,4 @@ if __name__ == '__main__':
     else:
         app_logger.info("Flask app starting. Gemini client initialized.")
     port = int(os.environ.get("PORT", 5000))
-    app.run(debug=False, host='0.0.0.0', port=port) # Set debug=False for production on Render
+    app.run(debug=False, host='0.0.0.0', port=port) # debug=False for Render
