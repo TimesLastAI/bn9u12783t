@@ -1,5 +1,6 @@
 Flask
 Flask-CORS
-Werkzeug
-gunicorn
 google-genai
+python-dotenv
+Pillow  # <-- This looks correct
+gunicorn
