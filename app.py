@@ -5,7 +5,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 from google import genai as google_genai_sdk
-from google.genai import types as google_genai_types
+from google.genai import types as google_genai_types # Ensure this alias is used
 from google.genai import errors as google_genai_errors
 from dotenv import load_dotenv
 from PIL import Image
@@ -48,18 +48,42 @@ if not os.path.exists(UPLOAD_FOLDER):
 SYSTEM_PROMPT = """You are a helpful and versatile AI assistant.
 Your primary goal is to provide accurate, informative, and engaging responses.
 When a user uploads a file, analyze its content in conjunction with their prompt.
+If you need to search the web for current information or to answer questions beyond your training data, please do so.
 Be polite and conversational. Structure your answers clearly. If generating code, use markdown code blocks.
 If you are unsure about something or cannot fulfill a request, explain why clearly and politely.
 """
 
+# MODIFIED: Safety Settings as per user's example - USE WITH CAUTION
+# WARNING: BLOCK_NONE disables safety filters. This is generally not recommended for production.
 SAFETY_SETTINGS = [
-    google_genai_types.SafetySetting(category=google_genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=google_genai_types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
-    google_genai_types.SafetySetting(category=google_genai_types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=google_genai_types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
-    google_genai_types.SafetySetting(category=google_genai_types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=google_genai_types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
-    google_genai_types.SafetySetting(category=google_genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=google_genai_types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE),
+    google_genai_types.SafetySetting(
+        category=google_genai_types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+        threshold=google_genai_types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    google_genai_types.SafetySetting(
+        category=google_genai_types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+        threshold=google_genai_types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    google_genai_types.SafetySetting(
+        category=google_genai_types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+        threshold=google_genai_types.HarmBlockThreshold.BLOCK_NONE,
+    ),
+    google_genai_types.SafetySetting(
+        category=google_genai_types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+        threshold=google_genai_types.HarmBlockThreshold.BLOCK_NONE,
+    ),
 ]
 
-GOOGLE_SEARCH_TOOL = []
+# MODIFIED: Google Search Tool definition as per user's example
+try:
+    GOOGLE_SEARCH_TOOL = [
+        google_genai_types.Tool(google_search=google_genai_types.GoogleSearch())
+    ]
+    logging.info("Google Search tool configured with types.GoogleSearch()")
+except AttributeError as e:
+    logging.error(f"Could not configure Google Search tool with types.GoogleSearch(): {e}. Disabling search tool.")
+    GOOGLE_SEARCH_TOOL = []
+
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -128,7 +152,6 @@ def chat_handler():
                     current_parts_for_sdk.append(google_genai_types.Part.from_text(text=item['text']))
                 elif 'file_data' in item and item['file_data'].get('file_uri') and item['file_data'].get('mime_type'):
                     fd = item['file_data']
-                    # MODIFIED: uri to file_uri
                     current_parts_for_sdk.append(google_genai_types.Part.from_uri(file_uri=fd['file_uri'], mime_type=fd['mime_type']))
             if current_parts_for_sdk:
                 gemini_chat_history.append(google_genai_types.Content(role=role, parts=current_parts_for_sdk))
@@ -138,9 +161,8 @@ def chat_handler():
         if prompt_text:
             current_user_message_parts_sdk.append(google_genai_types.Part.from_text(text=prompt_text))
         if gemini_sdk_uploaded_file_object:
-            # MODIFIED: uri to file_uri
             current_user_message_parts_sdk.append(google_genai_types.Part.from_uri(
-                file_uri=gemini_sdk_uploaded_file_object.uri, 
+                file_uri=gemini_sdk_uploaded_file_object.uri,
                 mime_type=gemini_sdk_uploaded_file_object.mime_type
             ))
 
@@ -152,8 +174,8 @@ def chat_handler():
         logging.info(f"Sending to Gemini. Contents length: {len(contents_for_generate)}")
         current_generation_config = google_genai_types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
-            safety_settings=SAFETY_SETTINGS,
-            tools=GOOGLE_SEARCH_TOOL
+            safety_settings=SAFETY_SETTINGS, # Using potentially BLOCK_NONE settings
+            tools=GOOGLE_SEARCH_TOOL # Using new tool definition
         )
         response = genai_client.models.generate_content(
             model=MODEL_NAME_CHAT, contents=contents_for_generate, config=current_generation_config
@@ -182,6 +204,12 @@ def chat_handler():
     except google_genai_errors.ClientError as e:
         logging.error(f"ClientError (google-genai): Status {e.status_code if hasattr(e, 'status_code') else 'N/A'} - {e}")
         error_message = f"Invalid request: {e.message}" if hasattr(e, 'message') and e.message else f"A client-side API error occurred: {str(e)}"
+        if hasattr(e, 'error_details') and e.error_details and 'message' in e.error_details[0]:
+            api_err_msg = e.error_details[0]['message']
+            if "Search Grounding is not supported" in api_err_msg or "GoogleSearch tool is not supported" in api_err_msg : # Check for variations
+                error_message = f"Invalid request: The configured Search tool is not supported by the current model/API. ({api_err_msg})"
+            else:
+                error_message = f"Invalid request: {api_err_msg}"
         cleanup_temp_file(temp_file_path, f"Context: ClientError - {error_message}")
         return jsonify({"error": error_message}), 400
     except google_genai_errors.APIError as e:
