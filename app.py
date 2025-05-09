@@ -12,7 +12,7 @@ from PIL import Image
 
 # --- Configuration ---
 load_dotenv()
-GOOGLE_API_KEY = os.getenv("AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo")
+GOOGLE_API_KEY = "AIzaSyBSlU9iv1ZISIcQy6WHUOL3v076-u2sLOo"
 
 if not GOOGLE_API_KEY:
     logging.error("CRITICAL: GOOGLE_API_KEY not found in environment variables or .env file. Please set it.")
