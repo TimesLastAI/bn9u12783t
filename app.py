@@ -192,7 +192,6 @@ def chat_handler():
                 # Initial upload request, file processing starts on Google's side.
                 sdk_uploaded_file = genai_client.files.upload(
                     file=temp_file_path,
-                    display_name=filename # Optional: helps identify file in Google Cloud Console
                 )
                 logging.info(f"File '{filename}' upload initiated. SDK File Name: {sdk_uploaded_file.name}, URI: {sdk_uploaded_file.uri}, State: {sdk_uploaded_file.state}")
 
