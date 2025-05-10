@@ -39,7 +39,7 @@ ALLOWED_EXTENSIONS = {
     'py', 'js', 'html', 'css', 'java', 'c', 'cpp', 'php', 'rb', 'swift', 'kt', 'go', 'ts', 'md',
     'mp4', 'mov', 'avi', 'mkv', 'webm' # Example video extensions
 }
-MODEL_NAME_CHAT = 'gemini-1.5-flash-preview-04-17' # Kept as requested
+MODEL_NAME_CHAT = 'gemini-2.5-flash-preview-04-17' # Kept as requested
 
 
 if not os.path.exists(UPLOAD_FOLDER):
