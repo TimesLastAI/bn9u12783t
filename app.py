@@ -33,9 +33,10 @@ CORS(app)
 UPLOAD_FOLDER = 'uploads'
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 ALLOWED_EXTENSIONS = {
-    'png', 'jpg', 'jpeg', 'webp', 'heic', 'heif',
-    'txt', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'json',
-    'py', 'js', 'html', 'css', 'java', 'c', 'cpp', 'php', 'rb', 'swift', 'kt', 'go', 'ts', 'md'
+    'png', 'jpg', 'jpeg', 'webp', 'heic', 'heif',  # Images
+    'txt', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'json',  # Documents
+    'py', 'js', 'html', 'css', 'java', 'c', 'cpp', 'php', 'rb', 'swift', 'kt', 'go', 'ts', 'md',  # Code
+    'mp4', 'mov', 'avi', 'mkv', 'webm', 'mpeg', 'wmv', 'flv', 'ogg'  # Videos
 }
 MODEL_NAME_CHAT = 'gemini-2.5-flash-preview-04-17'
 
