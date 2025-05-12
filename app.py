@@ -10,6 +10,8 @@ from google.genai import errors as google_genai_errors
 from dotenv import load_dotenv
 from PIL import Image
 import time
+from pytube import YouTube # Added for YouTube download
+import re # Added for YouTube URL validation
 
 # --- Configuration ---
 load_dotenv()
@@ -37,7 +39,7 @@ ALLOWED_EXTENSIONS = {
     'png', 'jpg', 'jpeg', 'webp', 'heic', 'heif',
     'txt', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv', 'json',
     'py', 'js', 'html', 'css', 'java', 'c', 'cpp', 'php', 'rb', 'swift', 'kt', 'go', 'ts', 'md',
-    'mp4', 'mov', 'avi', 'mkv', 'webm' # Example video extensions
+    'mp4', 'mov', 'avi', 'mkv', 'webm'
 }
 MODEL_NAME_CHAT = 'gemini-2.5-flash-preview-04-17' # Kept as requested
 
@@ -134,7 +136,6 @@ except AttributeError as e:
     logging.error(f"Could not configure Google Search tool with types.GoogleSearch(): {e}. Disabling search tool.")
     GOOGLE_SEARCH_TOOL = []
 
-# Define state strings for comparison (these will be compared against the .name attribute of the state enum)
 STATE_ACTIVE_STR = "ACTIVE"
 STATE_FAILED_STR = "FAILED"
 
@@ -145,7 +146,7 @@ def is_valid_image(filepath):
     try:
         img = Image.open(filepath)
         img.verify()
-        Image.open(filepath).load() # Try to load the image data
+        Image.open(filepath).load()
         return True
     except Exception:
         return False
@@ -158,86 +159,137 @@ def cleanup_temp_file(filepath, context_message=""):
         except Exception as e_del:
             logging.error(f"Error deleting temporary file '{filepath}' {context_message}: {e_del}")
 
+# --- YouTube Helper Functions ---
+def is_valid_youtube_url(url):
+    pattern = r"^(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})"
+    return re.match(pattern, url) is not None
+
+def download_video_from_youtube(url, download_folder):
+    try:
+        yt = YouTube(url)
+        stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').desc().first()
+        if not stream:
+            stream = yt.streams.first() # Fallback
+        if not stream:
+            return None, None, "No suitable video stream found for this YouTube URL."
+
+        safe_title = "".join([c if c.isalnum() or c in (' ', '-', '_') else '_' for c in yt.title])
+        video_filename = f"{safe_title[:50].strip() or 'youtube_video'}.mp4"
+        
+        # Ensure download_folder exists
+        if not os.path.exists(download_folder):
+            os.makedirs(download_folder)
+            
+        output_path = os.path.join(download_folder, video_filename)
+
+        logging.info(f"Downloading YouTube video '{yt.title}' to '{output_path}'...")
+        stream.download(output_path=download_folder, filename=video_filename)
+        logging.info(f"YouTube video '{video_filename}' downloaded successfully.")
+        return output_path, video_filename, None
+    except Exception as e:
+        logging.error(f"Error downloading YouTube video from URL {url}: {e}")
+        return None, None, str(e)
+
 @app.route('/chat', methods=['POST'])
 def chat_handler():
     if not genai_client:
         return jsonify({"error": "API client not initialized. Check server logs."}), 500
 
-    temp_file_path = None
+    temp_file_path_for_gemini_upload = None
+    filename_for_gemini_upload = None
     active_gemini_file_object = None
     uploaded_file_details_for_frontend = None
+    path_to_cleanup_on_server = None
 
     try:
         prompt_text = request.form.get('prompt', '')
         history_json = request.form.get('history', '[]')
+        youtube_url = request.form.get('youtube_url')
+        file_from_request = request.files.get('file')
 
-        if 'file' in request.files:
-            file_from_request = request.files['file']
-            if file_from_request and file_from_request.filename and allowed_file(file_from_request.filename):
-                filename = secure_filename(file_from_request.filename)
-                temp_file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                file_from_request.save(temp_file_path)
-                logging.info(f"File '{filename}' saved to '{temp_file_path}'")
+        # --- 1. Prepare file if any (YouTube or direct upload) ---
+        if youtube_url:
+            if not is_valid_youtube_url(youtube_url):
+                return jsonify({"error": "Invalid YouTube URL provided."}), 400
+            
+            dl_path, dl_filename, yt_error = download_video_from_youtube(youtube_url, app.config['UPLOAD_FOLDER'])
+            if yt_error:
+                return jsonify({"error": f"Failed to download YouTube video: {yt_error}"}), 500
+            if not dl_path or not dl_filename:
+                return jsonify({"error": "An unknown error occurred while preparing the YouTube video."}), 500
+            
+            temp_file_path_for_gemini_upload = dl_path
+            filename_for_gemini_upload = dl_filename
+            path_to_cleanup_on_server = dl_path
+            logging.info(f"YouTube video '{dl_filename}' prepared for Gemini upload from '{dl_path}'")
 
-                file_extension = filename.rsplit('.', 1)[1].lower()
+        elif file_from_request:
+            if file_from_request.filename and allowed_file(file_from_request.filename):
+                filename_for_gemini_upload = secure_filename(file_from_request.filename)
+                temp_file_path_for_gemini_upload = os.path.join(app.config['UPLOAD_FOLDER'], filename_for_gemini_upload)
+                file_from_request.save(temp_file_path_for_gemini_upload)
+                path_to_cleanup_on_server = temp_file_path_for_gemini_upload
+                logging.info(f"Directly uploaded file '{filename_for_gemini_upload}' saved to '{temp_file_path_for_gemini_upload}'")
+
+                file_extension = filename_for_gemini_upload.rsplit('.', 1)[1].lower()
                 if file_extension in {'png', 'jpg', 'jpeg', 'webp', 'heic', 'heif'}:
-                    if not is_valid_image(temp_file_path):
-                        cleanup_temp_file(temp_file_path, "Context: Invalid image uploaded.")
-                        return jsonify({"error": f"Uploaded file '{filename}' is not a valid image."}), 400
+                    if not is_valid_image(temp_file_path_for_gemini_upload):
+                        cleanup_temp_file(path_to_cleanup_on_server, "Context: Invalid image uploaded directly.")
+                        return jsonify({"error": f"Uploaded file '{filename_for_gemini_upload}' is not a valid image."}), 400
+            elif file_from_request.filename:
+                 return jsonify({"error": f"File type not allowed for '{file_from_request.filename}'."}), 400
+        
+        # --- 2. Upload to Gemini File API if a file was prepared ---
+        if temp_file_path_for_gemini_upload and filename_for_gemini_upload:
+            logging.info(f"Uploading '{filename_for_gemini_upload}' to Gemini File API from path '{temp_file_path_for_gemini_upload}'...")
+            current_file_object_sdk = genai_client.files.upload(file=temp_file_path_for_gemini_upload) # Renamed to avoid conflict
+            
+            initial_state_name = current_file_object_sdk.state.name if hasattr(current_file_object_sdk.state, 'name') else str(current_file_object_sdk.state)
+            logging.info(f"File '{filename_for_gemini_upload}' upload initiated. SDK File Name: {current_file_object_sdk.name}, Display Name: {current_file_object_sdk.display_name}, URI: {current_file_object_sdk.uri}, State: {initial_state_name}")
 
-                logging.info(f"Uploading '{filename}' to Gemini File API...")
-                current_file_object = genai_client.files.upload(
-                    file=temp_file_path
-                )
-                # Log the .name of the state enum for clarity
-                initial_state_name = current_file_object.state.name if hasattr(current_file_object.state, 'name') else str(current_file_object.state)
-                logging.info(f"File '{filename}' upload initiated. SDK File Name: {current_file_object.name}, Display Name: {current_file_object.display_name}, URI: {current_file_object.uri}, State: {initial_state_name}")
+            file_resource_name = current_file_object_sdk.name
+            timeout_seconds = 600
+            polling_interval_seconds = 10
+            start_time = time.time()
 
-                file_resource_name = current_file_object.name
-                timeout_seconds = 600
-                polling_interval_seconds = 10
-                start_time = time.time()
+            while current_file_object_sdk.state.name != STATE_ACTIVE_STR:
+                current_state_name = current_file_object_sdk.state.name if hasattr(current_file_object_sdk.state, 'name') else str(current_file_object_sdk.state)
+                if time.time() - start_time > timeout_seconds:
+                    error_msg = f"Timeout waiting for file '{filename_for_gemini_upload}' ({file_resource_name}) to become ACTIVE. Last state: {current_state_name}"
+                    logging.error(error_msg)
+                    cleanup_temp_file(path_to_cleanup_on_server, f"Context: Timeout waiting for file. Last state: {current_state_name}")
+                    try:
+                        genai_client.files.delete(name=file_resource_name)
+                        logging.info(f"Attempted to delete file '{file_resource_name}' from Gemini due to timeout.")
+                    except Exception as e_del_api:
+                        logging.error(f"Error deleting file '{file_resource_name}' from Gemini after timeout: {e_del_api}")
+                    return jsonify({"error": f"Processing file '{filename_for_gemini_upload}' timed out."}), 500
 
-                # --- FIX 1: Polling loop with corrected state comparison (using .name) ---
-                while current_file_object.state.name != STATE_ACTIVE_STR:
-                    current_state_name = current_file_object.state.name if hasattr(current_file_object.state, 'name') else str(current_file_object.state)
-                    if time.time() - start_time > timeout_seconds:
-                        error_msg = f"Timeout waiting for file '{filename}' ({file_resource_name}) to become ACTIVE. Last state: {current_state_name}"
-                        logging.error(error_msg)
-                        cleanup_temp_file(temp_file_path, f"Context: Timeout waiting for file. Last state: {current_state_name}")
-                        try:
-                            genai_client.files.delete(name=file_resource_name)
-                            logging.info(f"Attempted to delete file '{file_resource_name}' from Gemini due to timeout.")
-                        except Exception as e_del_api:
-                            logging.error(f"Error deleting file '{file_resource_name}' from Gemini after timeout: {e_del_api}")
-                        return jsonify({"error": f"Processing file '{filename}' timed out. It may be too large or there's a server issue. Please try again later."}), 500
+                logging.info(f"File '{filename_for_gemini_upload}' ({file_resource_name}) state is '{current_state_name}'. Waiting...")
+                time.sleep(polling_interval_seconds)
+                current_file_object_sdk = genai_client.files.get(name=file_resource_name)
 
-                    logging.info(f"File '{filename}' ({file_resource_name}) state is '{current_state_name}'. Waiting...")
-                    time.sleep(polling_interval_seconds)
-                    current_file_object = genai_client.files.get(name=file_resource_name) # Fetch the latest status
+                if current_file_object_sdk.state.name == STATE_FAILED_STR:
+                    error_msg = f"File '{filename_for_gemini_upload}' ({file_resource_name}) processing FAILED. Error details: {getattr(current_file_object_sdk, 'error', 'N/A')}"
+                    logging.error(error_msg)
+                    cleanup_temp_file(path_to_cleanup_on_server, "Context: File processing FAILED on Gemini service.")
+                    try:
+                        genai_client.files.delete(name=file_resource_name)
+                        logging.info(f"Attempted to delete FAILED file '{file_resource_name}' from Gemini.")
+                    except Exception as e_del_api:
+                        logging.error(f"Error deleting FAILED file '{file_resource_name}' from Gemini: {e_del_api}")
+                    return jsonify({"error": f"File '{filename_for_gemini_upload}' could not be processed."}), 500
 
-                    if current_file_object.state.name == STATE_FAILED_STR:
-                        error_msg = f"File '{filename}' ({file_resource_name}) processing FAILED. Error details: {getattr(current_file_object, 'error', 'N/A')}"
-                        logging.error(error_msg)
-                        cleanup_temp_file(temp_file_path, "Context: File processing FAILED on Gemini service.")
-                        try:
-                            genai_client.files.delete(name=file_resource_name)
-                            logging.info(f"Attempted to delete FAILED file '{file_resource_name}' from Gemini.")
-                        except Exception as e_del_api:
-                            logging.error(f"Error deleting FAILED file '{file_resource_name}' from Gemini: {e_del_api}")
-                        return jsonify({"error": f"File '{filename}' could not be processed. It might be corrupted or an unsupported format. Please try a different file."}), 500
+            active_gemini_file_object = current_file_object_sdk
+            logging.info(f"File '{filename_for_gemini_upload}' ({file_resource_name}) is now ACTIVE. URI: {active_gemini_file_object.uri}")
 
-                active_gemini_file_object = current_file_object
-                logging.info(f"File '{filename}' ({file_resource_name}) is now ACTIVE. URI: {active_gemini_file_object.uri}")
-
-                uploaded_file_details_for_frontend = {
-                    "uri": active_gemini_file_object.uri,
-                    "mime_type": active_gemini_file_object.mime_type,
-                    "name": filename
-                }
-            elif file_from_request and file_from_request.filename:
-                return jsonify({"error": f"File type not allowed for '{file_from_request.filename}'."}), 400
-
+            uploaded_file_details_for_frontend = {
+                "uri": active_gemini_file_object.uri,
+                "mime_type": active_gemini_file_object.mime_type,
+                "name": filename_for_gemini_upload
+            }
+        
+        # --- 3. Prepare history and current message for Gemini ---
         frontend_history = json.loads(history_json)
         gemini_chat_history = []
         for entry in frontend_history:
@@ -256,23 +308,24 @@ def chat_handler():
         contents_for_generate = list(gemini_chat_history)
         current_user_message_parts_sdk = []
 
-        # --- FIX 2: Order of parts for the current user message ---
-        # Add file part first if it exists and is active
         if active_gemini_file_object:
             current_user_message_parts_sdk.append(google_genai_types.Part.from_uri(
                 file_uri=active_gemini_file_object.uri,
                 mime_type=active_gemini_file_object.mime_type
             ))
-        # Then add text part if it exists
         if prompt_text:
             current_user_message_parts_sdk.append(google_genai_types.Part.from_text(text=prompt_text))
+        
+        if not prompt_text and not active_gemini_file_object:
+            cleanup_temp_file(path_to_cleanup_on_server, "Context: Empty message (no text and no file processed).")
+            return jsonify({"error": "Cannot send an empty message. Provide text or upload/link a file."}), 400
 
+        if current_user_message_parts_sdk: # Only append if there's something to append
+            contents_for_generate.append(google_genai_types.Content(role='user', parts=current_user_message_parts_sdk))
+        elif not contents_for_generate: # No history and no current message parts
+             cleanup_temp_file(path_to_cleanup_on_server, "Context: No content to send to Gemini.")
+             return jsonify({"error": "No content to send to the AI (empty history and current message)."}), 400
 
-        if not current_user_message_parts_sdk: # No text and no (active) file this turn
-            cleanup_temp_file(temp_file_path, "Context: Empty message (no text or active file).")
-            return jsonify({"error": "Cannot send an empty message. Provide text or upload a file."}), 400
-
-        contents_for_generate.append(google_genai_types.Content(role='user', parts=current_user_message_parts_sdk))
 
         logging.info(f"Sending to Gemini. Contents length: {len(contents_for_generate)}")
         if current_user_message_parts_sdk:
@@ -283,7 +336,7 @@ def chat_handler():
             safety_settings=SAFETY_SETTINGS,
             tools=GOOGLE_SEARCH_TOOL
         )
-
+        # --- 4. Send to Gemini model ---
         response = genai_client.models.generate_content(
             model=MODEL_NAME_CHAT,
             contents=contents_for_generate,
@@ -293,10 +346,9 @@ def chat_handler():
 
         if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
             block_reason_enum = response.prompt_feedback.block_reason
-            # Use .name for block_reason_enum if available, otherwise convert to string
             block_reason_name = block_reason_enum.name if hasattr(block_reason_enum, 'name') else str(block_reason_enum)
             logging.error(f"Prompt blocked by Gemini. Reason: {block_reason_name}")
-            cleanup_temp_file(temp_file_path, "Context: Prompt blocked by Gemini.")
+            cleanup_temp_file(path_to_cleanup_on_server, "Context: Prompt blocked by Gemini.")
             if active_gemini_file_object:
                 try:
                     genai_client.files.delete(name=active_gemini_file_object.name)
@@ -310,44 +362,41 @@ def chat_handler():
             for part in response.candidates[0].content.parts:
                 if hasattr(part, 'text') and part.text:
                     reply_text += part.text
-        elif hasattr(response, 'text') and response.text: # Fallback for simpler responses
+        elif hasattr(response, 'text') and response.text:
             reply_text = response.text
 
         response_data = {"reply": reply_text}
-        if uploaded_file_details_for_frontend: # If a file was uploaded and processed this turn
+        if uploaded_file_details_for_frontend:
             response_data["uploaded_file_details"] = uploaded_file_details_for_frontend
 
         return jsonify(response_data)
 
     except google_genai_errors.ClientError as e:
         error_message = f"A client-side API error occurred: {str(e)}"
-        if hasattr(e, 'message') and e.message:
-            error_message = f"Invalid request: {e.message}"
+        if hasattr(e, 'message') and e.message: error_message = f"Invalid request: {e.message}"
         if hasattr(e, 'error_details') and e.error_details and isinstance(e.error_details, list) and len(e.error_details) > 0 and 'message' in e.error_details[0]:
             api_err_msg = e.error_details[0]['message']
             if "Search Grounding is not supported" in api_err_msg or "GoogleSearch tool is not supported" in api_err_msg:
                 error_message = f"Invalid request: The configured Search tool is not supported by the current model/API. ({api_err_msg})"
-            else:
-                error_message = f"Invalid request: {api_err_msg}"
-
+            else: error_message = f"Invalid request: {api_err_msg}"
         logging.error(f"ClientError (google-genai): {error_message} (Full error: {e})")
-        cleanup_temp_file(temp_file_path, f"Context: ClientError - {error_message}")
+        cleanup_temp_file(path_to_cleanup_on_server, f"Context: ClientError - {error_message}")
         return jsonify({"error": error_message}), 400
     except google_genai_errors.APIError as e:
         logging.error(f"APIError (google-genai): {e}")
-        cleanup_temp_file(temp_file_path, "Context: APIError caught.")
+        cleanup_temp_file(path_to_cleanup_on_server, "Context: APIError caught.")
         return jsonify({"error": f"An API error occurred with Google services: {str(e)}"}), 500
     except json.JSONDecodeError as e:
         logging.error(f"JSONDecodeError for history: {e}")
         return jsonify({"error": f"Invalid history format sent from client: {str(e)}"}), 400
     except Exception as e:
-        logging.exception("An unexpected error occurred in /chat") # Logs full traceback
+        logging.exception("An unexpected error occurred in /chat")
         actual_error_message = str(e)
-        cleanup_temp_file(temp_file_path, "Context: General Exception caught.")
+        cleanup_temp_file(path_to_cleanup_on_server, "Context: General Exception caught.")
         return jsonify({"error": f"An unexpected server error occurred: {actual_error_message}"}), 500
     finally:
-        if temp_file_path and os.path.exists(temp_file_path):
-            cleanup_temp_file(temp_file_path, "Context: End of request processing in finally block.")
+        if path_to_cleanup_on_server and os.path.exists(path_to_cleanup_on_server):
+            cleanup_temp_file(path_to_cleanup_on_server, "Context: End of request processing in finally block.")
 
 if __name__ == '__main__':
     logging.basicConfig(
