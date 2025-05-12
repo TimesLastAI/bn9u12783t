@@ -3,5 +3,5 @@ Flask-CORS
 google-genai
 python-dotenv
 Pillow  # <-- This looks correct
-pytube
+yt-dlp
 gunicorn
