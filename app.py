@@ -158,6 +158,12 @@ def cleanup_temp_file(filepath, context_message=""):
         except Exception as e_del:
             logging.error(f"Error deleting temporary file '{filepath}' {context_message}: {e_del}")
 
+# --- ADDED HEALTH CHECK ENDPOINT ---
+@app.route("/", methods=["GET"])
+def health_check():
+    return "OK", 200
+# --- END OF ADDED HEALTH CHECK ENDPOINT ---
+
 @app.route('/chat', methods=['POST'])
 def chat_handler():
     if not genai_client:
