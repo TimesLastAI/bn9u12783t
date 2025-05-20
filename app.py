@@ -39,7 +39,7 @@ ALLOWED_EXTENSIONS = {
     'py', 'js', 'html', 'css', 'java', 'c', 'cpp', 'php', 'rb', 'swift', 'kt', 'go', 'ts', 'md',
     'mp4', 'mov', 'avi', 'mkv', 'webm' # Example video extensions
 }
-MODEL_NAME_CHAT = 'gemini-2.5-flash-preview-04-17' # Kept as requested
+MODEL_NAME_CHAT = 'gemini-2.5-flash-preview-05-20' # Kept as requested
 
 
 if not os.path.exists(UPLOAD_FOLDER):
@@ -158,6 +158,19 @@ def cleanup_temp_file(filepath, context_message=""):
         except Exception as e_del:
             logging.error(f"Error deleting temporary file '{filepath}' {context_message}: {e_del}")
 
+# --- NEW HELPER FUNCTION ---
+def _sanitize_error_text_for_output(original_message):
+    """
+    Sanitizes an error message: if it contains "gemini" or "google" (case-insensitive),
+    it returns "Error". Otherwise, it returns the original message.
+    """
+    if isinstance(original_message, str):
+        lower_message = original_message.lower()
+        if "gemini" in lower_message or "google" in lower_message:
+            return "Error"
+    return original_message
+# --- END NEW HELPER FUNCTION ---
+
 # --- ADDED HEALTH CHECK ENDPOINT ---
 @app.route("/", methods=["GET"])
 def health_check():
@@ -167,6 +180,7 @@ def health_check():
 @app.route('/chat', methods=['POST'])
 def chat_handler():
     if not genai_client:
+        # This message doesn't contain "gemini" or "google", so no sanitization here.
         return jsonify({"error": "API client not initialized. Check server logs."}), 500
 
     temp_file_path = None
@@ -309,6 +323,7 @@ def chat_handler():
                     logging.info(f"Deleted file {active_gemini_file_object.name} from Gemini as prompt was blocked.")
                 except Exception as e_del_api:
                     logging.error(f"Error deleting file {active_gemini_file_object.name} from Gemini after prompt block: {e_del_api}")
+            # This error message does not contain "gemini" or "google" directly.
             return jsonify({"error": f"Request blocked due to content policy ({block_reason_name})."}), 400
 
         reply_text = ""
@@ -338,19 +353,35 @@ def chat_handler():
 
         logging.error(f"ClientError (google-genai): {error_message} (Full error: {e})")
         cleanup_temp_file(temp_file_path, f"Context: ClientError - {error_message}")
-        return jsonify({"error": error_message}), 400
+        # Sanitize the error message before sending to client
+        sanitized_error = _sanitize_error_text_for_output(error_message)
+        return jsonify({"error": sanitized_error}), 400
     except google_genai_errors.APIError as e:
         logging.error(f"APIError (google-genai): {e}")
         cleanup_temp_file(temp_file_path, "Context: APIError caught.")
-        return jsonify({"error": f"An API error occurred with Google services: {str(e)}"}), 500
+        original_error_message = f"An API error occurred with Google services: {str(e)}"
+        # This message will always contain "Google", so it will be sanitized to "Error"
+        sanitized_error = _sanitize_error_text_for_output(original_error_message)
+        return jsonify({"error": sanitized_error}), 500
     except json.JSONDecodeError as e:
         logging.error(f"JSONDecodeError for history: {e}")
+        # This error message does not contain "gemini" or "google".
         return jsonify({"error": f"Invalid history format sent from client: {str(e)}"}), 400
     except Exception as e:
         logging.exception("An unexpected error occurred in /chat") # Logs full traceback
         actual_error_message = str(e)
         cleanup_temp_file(temp_file_path, "Context: General Exception caught.")
-        return jsonify({"error": f"An unexpected server error occurred: {actual_error_message}"}), 500
+        
+        # Determine the error message to display
+        sanitized_part = _sanitize_error_text_for_output(actual_error_message)
+        if sanitized_part == "Error":
+            # If the underlying message was sanitized to "Error", just return "Error"
+            final_output_error = "Error"
+        else:
+            # Otherwise, use the standard unexpected error message with the (un-sanitized) error part
+            final_output_error = f"An unexpected server error occurred: {sanitized_part}"
+            
+        return jsonify({"error": final_output_error}), 500
     finally:
         if temp_file_path and os.path.exists(temp_file_path):
             cleanup_temp_file(temp_file_path, "Context: End of request processing in finally block.")
